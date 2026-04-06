@@ -6,6 +6,10 @@ agents:
   # X traits are sampled uniformly from [x_init_low, x_init_high] at episode start
   x_init_low: 0.2
   x_init_high: 0.8
+  # Base std for perceptual noise added to observations.
+  # Actual noise std = obs_noise_scale * (1 - effective_eq).
+  # Agents with higher EQ perceive themselves and their partner more accurately.
+  obs_noise_scale: 0.05
 
 reflection:
   # |delta_y| on any single Y variable must exceed this to trigger reflection
@@ -13,9 +17,18 @@ reflection:
   # max absolute change applied to any X trait during reflection
   x_change_magnitude: 0.05
 
+# Per-agent reward weights over Y state variables.
+# Different weights encode different life priorities, creating genuine
+# multi-agent tension — no single "perfect" strategy satisfies both partners.
 reward:
-  happiness_weight: 0.6
-  stability_weight: 0.4
+  agent_h:
+    happiness_weight: 0.5
+    stability_weight: 0.3
+    wealth_weight: 0.2
+  agent_w:
+    happiness_weight: 0.6
+    stability_weight: 0.4
+    wealth_weight: 0.0
 
 training:
   learning_rate: 0.001
