@@ -1,0 +1,128 @@
+# Life event catalog.
+# probability: chance of this event occurring in any given year (age step).
+# base_delta_y: Y changes applied before agent responses are factored in.
+#   Positive = increase, negative = decrease. All Y values are in [0, 1].
+# special: optional flag handled directly by the environment (e.g. increment_kids).
+
+events:
+  - name: job_loss
+    description: "One partner unexpectedly loses their job."
+    probability: 0.04
+    base_delta_y:
+      wealth: -0.20
+      pressure: 0.30
+      stability: -0.05
+
+  - name: promotion
+    description: "One partner receives a significant career advancement."
+    probability: 0.05
+    base_delta_y:
+      wealth: 0.20
+      pressure: -0.10
+      happiness: 0.10
+
+  - name: financial_crisis
+    description: "A major unexpected expense hits the household."
+    probability: 0.04
+    base_delta_y:
+      wealth: -0.25
+      pressure: 0.35
+      stability: -0.10
+
+  - name: financial_windfall
+    description: "Inheritance, bonus, or unexpected financial gain."
+    probability: 0.02
+    base_delta_y:
+      wealth: 0.30
+      pressure: -0.15
+      happiness: 0.10
+
+  - name: new_child
+    description: "The couple has a child."
+    probability: 0.04
+    special: increment_kids
+    base_delta_y:
+      pressure: 0.25
+      love_support: 0.10
+      happiness: 0.10
+
+  - name: health_crisis
+    description: "A serious illness or injury affects one partner."
+    probability: 0.04
+    base_delta_y:
+      wealth: -0.15
+      pressure: 0.30
+      love_support: 0.05
+      happiness: -0.15
+
+  - name: infidelity
+    description: "One partner's unfaithfulness is discovered."
+    probability: 0.02
+    base_delta_y:
+      love_support: -0.50
+      stability: -0.40
+      happiness: -0.30
+
+  - name: emotional_conflict
+    description: "A prolonged argument or period of emotional tension."
+    probability: 0.08
+    base_delta_y:
+      love_support: -0.20
+      stability: -0.15
+      pressure: 0.15
+
+  - name: family_death
+    description: "Loss of a close family member."
+    probability: 0.03
+    base_delta_y:
+      pressure: 0.20
+      happiness: -0.20
+      love_support: 0.05
+
+  - name: relocation
+    description: "The couple moves to a new city or country."
+    probability: 0.03
+    base_delta_y:
+      pressure: 0.15
+      stability: -0.05
+      wealth: -0.05
+
+  - name: shared_achievement
+    description: "A major milestone accomplished together (home purchase, travel, project)."
+    probability: 0.05
+    base_delta_y:
+      happiness: 0.20
+      love_support: 0.15
+      stability: 0.05
+
+  - name: mental_health_episode
+    description: "One partner experiences a significant mental health struggle."
+    probability: 0.04
+    base_delta_y:
+      pressure: 0.25
+      love_support: -0.10
+      happiness: -0.15
+
+  - name: romantic_gesture
+    description: "One partner makes a significant romantic effort."
+    probability: 0.05
+    base_delta_y:
+      love_support: 0.20
+      happiness: 0.15
+      stability: 0.05
+
+  - name: parenting_conflict
+    description: "Disagreement about how to raise the children."
+    probability: 0.04
+    base_delta_y:
+      love_support: -0.15
+      stability: -0.10
+      pressure: 0.15
+
+  - name: financial_disagreement
+    description: "Conflict over spending, saving, or financial priorities."
+    probability: 0.06
+    base_delta_y:
+      love_support: -0.10
+      stability: -0.10
+      pressure: 0.15

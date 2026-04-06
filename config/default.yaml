@@ -1,0 +1,25 @@
+simulation:
+  age_start: 25
+  age_end: 80
+
+agents:
+  # X traits are sampled uniformly from [x_init_low, x_init_high] at episode start
+  x_init_low: 0.2
+  x_init_high: 0.8
+
+reflection:
+  # |delta_y| on any single Y variable must exceed this to trigger reflection
+  threshold: 0.15
+  # max absolute change applied to any X trait during reflection
+  x_change_magnitude: 0.05
+
+reward:
+  happiness_weight: 0.6
+  stability_weight: 0.4
+
+training:
+  learning_rate: 0.001
+  gamma: 0.99        # discount factor for future rewards
+  episodes: 10000
+  hidden_dim: 64
+  seed: 42
