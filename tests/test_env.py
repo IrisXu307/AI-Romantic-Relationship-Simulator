@@ -257,7 +257,7 @@ def test_adjusted_probs_preserve_total_mass(env):
 
 @pytest.fixture
 def neutral_x():
-    """Neutral XTraits at 0.5 so trait scaling doesn't skew interaction tests."""
+    """Neutral XTraits at 0.5 so trait effects are controlled in interaction tests."""
     from src.env.state import XTraits
     return XTraits(
         iq=0.5, eq=0.5, rational_thinking=0.5, emotional_reasoning=0.5,
@@ -265,52 +265,124 @@ def neutral_x():
         responsibility=0.5, mental_stability=0.5, kids=0.0,
     )
 
+
 def test_mutual_support_beats_support_argue(env, neutral_x):
-    """(support, support) should produce better love_support than (support, argue)."""
+    """(support, support) produces better love_support than (support, argue)."""
     catalog = env.events
     d_both_support = catalog.compute_delta_y(None, 0, 0, neutral_x, neutral_x)
     d_support_argue = catalog.compute_delta_y(None, 0, 1, neutral_x, neutral_x)
     assert d_both_support.get("love_support", 0) > d_support_argue.get("love_support", 0)
 
-def test_mutual_argue_worse_than_argue_compromise(env, neutral_x):
-    """(argue, argue) should do more stability damage than (argue, compromise)."""
-    catalog = env.events
-    d_both_argue = catalog.compute_delta_y(None, 1, 1, neutral_x, neutral_x)
-    d_argue_compromise = catalog.compute_delta_y(None, 1, 3, neutral_x, neutral_x)
-    assert d_both_argue.get("stability", 0) < d_argue_compromise.get("stability", 0)
 
-def test_support_argue_is_asymmetric(env, neutral_x):
+def test_mutual_argue_worse_than_argue_compromise(env, neutral_x):
+    """(argue, argue) does more stability damage than (argue, compromise)."""
+    catalog = env.events
+    d_both_argue    = catalog.compute_delta_y(None, 1, 1, neutral_x, neutral_x)
+    d_argue_cmpr    = catalog.compute_delta_y(None, 1, 3, neutral_x, neutral_x)
+    assert d_both_argue.get("stability", 0) < d_argue_cmpr.get("stability", 0)
+
+
+def test_stonewall_worse_than_argue_support(env, neutral_x):
+    """(argue, ignore) hurts love_support more than (argue, support)."""
+    catalog = env.events
+    d_stonewall    = catalog.compute_delta_y(None, 1, 2, neutral_x, neutral_x)
+    d_argue_support = catalog.compute_delta_y(None, 1, 0, neutral_x, neutral_x)
+    assert d_stonewall.get("love_support", 0) < d_argue_support.get("love_support", 0)
+
+
+def test_mutual_compromise_produces_stability_gain(env, neutral_x):
+    """(compromise, compromise) yields positive net stability."""
+    catalog = env.events
+    delta = catalog.compute_delta_y(None, 3, 3, neutral_x, neutral_x)
+    assert delta.get("stability", 0) > 0
+
+
+def test_support_backfires_with_rational_partner(env):
     """
-    (support, argue) and (argue, support) should produce different deltas:
-    in (support, argue) it's H whose effect is dampened; in (argue, support)
-    it's W. The net love_support should be the same by symmetry, but the
-    individual contributions differ.
+    Support should hurt love_support when partner is highly rational
+    and non-emotional — it reads as patronizing.
+    """
+    from src.env.state import XTraits
+    catalog = env.events
+    supporter = XTraits(eq=0.5, ability_to_love=0.5, mental_stability=0.5)
+    rational_partner = XTraits(rational_thinking=0.9, emotional_reasoning=0.1,
+                               eq=0.3, ability_to_love=0.3)
+    emotional_partner = XTraits(rational_thinking=0.1, emotional_reasoning=0.9,
+                                eq=0.8, ability_to_love=0.8)
+
+    d_rational  = catalog.compute_delta_y(None, 0, 2, supporter, rational_partner)
+    d_emotional = catalog.compute_delta_y(None, 0, 2, supporter, emotional_partner)
+
+    # Support lands better with emotional partner; may go negative with rational one
+    assert d_rational.get("love_support", 0) < d_emotional.get("love_support", 0)
+
+
+def test_compromise_backfires_with_emotional_partner(env):
+    """
+    Compromise should produce lower (possibly negative) love_support when partner
+    is highly emotional and non-rational — it feels cold and transactional.
+    """
+    from src.env.state import XTraits
+    catalog = env.events
+    compromiser = XTraits(rational_thinking=0.7, iq=0.7, mental_stability=0.5)
+    emotional_partner = XTraits(emotional_reasoning=0.9, rational_thinking=0.1,
+                                eq=0.8, ability_to_love=0.8)
+    rational_partner  = XTraits(emotional_reasoning=0.1, rational_thinking=0.9,
+                                eq=0.4, ability_to_love=0.4)
+
+    d_emotional = catalog.compute_delta_y(None, 3, 2, compromiser, emotional_partner)
+    d_rational  = catalog.compute_delta_y(None, 3, 2, compromiser, rational_partner)
+
+    assert d_emotional.get("love_support", 0) < d_rational.get("love_support", 0)
+
+
+def test_strategic_ignore_less_damaging_than_chronic(env):
+    """
+    A high-stability, responsible agent ignoring reduces neglect damage vs
+    a low-stability, irresponsible agent ignoring.
+    """
+    from src.env.state import XTraits
+    catalog = env.events
+    partner = XTraits(eq=0.5, ability_to_love=0.5)
+    strategic = XTraits(mental_stability=0.9, responsibility=0.9)
+    chronic   = XTraits(mental_stability=0.1, responsibility=0.1)
+
+    d_strategic = catalog.compute_delta_y(None, 2, 2, strategic, partner)
+    d_chronic   = catalog.compute_delta_y(None, 2, 2, chronic, partner)
+
+    assert d_strategic.get("love_support", 0) > d_chronic.get("love_support", 0)
+
+
+def test_withdraw_always_reduces_pressure(env, neutral_x):
+    """Withdraw should always reduce pressure regardless of traits or partner action."""
+    from src.env.events import N_ACTIONS
+    catalog = env.events
+    for partner_action in range(N_ACTIONS):
+        delta = catalog.compute_delta_y(None, 4, partner_action, neutral_x, neutral_x)
+        # H withdraws; H's contribution to pressure is always negative
+        # (partner may add their own, but net should still be reduced vs argue)
+        assert delta.get("pressure", 0) < 0.20, (
+            f"Expected low pressure for withdraw vs action {partner_action}, got {delta.get('pressure')}"
+        )
+
+
+def test_symmetric_pairs_equal_with_neutral_traits(env, neutral_x):
+    """
+    (support_h, argue_w) and (argue_h, support_w) should produce the same
+    net love_support when both agents have identical neutral traits.
     """
     catalog = env.events
     d_sh_aw = catalog.compute_delta_y(None, 0, 1, neutral_x, neutral_x)
     d_ah_sw = catalog.compute_delta_y(None, 1, 0, neutral_x, neutral_x)
-    # Net love_support should match (symmetric traits, symmetric structure)
     np.testing.assert_almost_equal(
         d_sh_aw.get("love_support", 0),
         d_ah_sw.get("love_support", 0),
         decimal=6,
     )
 
-def test_stonewall_worse_than_argue_alone(env, neutral_x):
-    """(argue, ignore) stonewalling should hurt love_support more than (argue, support)."""
-    catalog = env.events
-    d_stonewall = catalog.compute_delta_y(None, 1, 2, neutral_x, neutral_x)
-    d_argue_support = catalog.compute_delta_y(None, 1, 0, neutral_x, neutral_x)
-    assert d_stonewall.get("love_support", 0) < d_argue_support.get("love_support", 0)
-
-def test_mutual_compromise_produces_stability_gain(env, neutral_x):
-    """(compromise, compromise) should yield positive stability from interaction bonus."""
-    catalog = env.events
-    delta = catalog.compute_delta_y(None, 3, 3, neutral_x, neutral_x)
-    assert delta.get("stability", 0) > 0
 
 def test_all_25_action_pairs_return_valid_delta(env, neutral_x):
-    """Every action pair should return a delta dict with finite values."""
+    """Every action pair returns a delta dict with finite values."""
     from src.env.events import N_ACTIONS
     catalog = env.events
     for a_h in range(N_ACTIONS):

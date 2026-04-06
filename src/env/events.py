@@ -4,9 +4,6 @@ from typing import Callable, Optional
 
 from src.env.state import XTraits
 
-# Type alias for an interaction entry
-_Interaction = tuple[float, float, dict[str, float]]
-
 # ── Action space ──────────────────────────────────────────────────────────────
 
 ACTION_SUPPORT    = 0  # try to help, comfort, or encourage
@@ -18,39 +15,214 @@ ACTION_WITHDRAW   = 4  # pull back emotionally without fighting
 N_ACTIONS = 5
 ACTION_NAMES = ["support", "argue", "ignore", "compromise", "withdraw"]
 
-# ── How each action shifts Y (base modifier before X scaling) ─────────────────
-# Each action is applied per-agent and averaged, so the total effect per agent
-# is halved to avoid double-counting.
 
-_ACTION_BASE: dict[int, dict[str, float]] = {
-    ACTION_SUPPORT:    {"love_support":  0.15, "pressure": -0.10, "stability":  0.08, "happiness":  0.05},
-    ACTION_ARGUE:      {"love_support": -0.25, "pressure":  0.20, "stability": -0.15, "happiness": -0.10},
-    ACTION_IGNORE:     {"love_support": -0.10, "pressure":  0.05, "stability": -0.08, "happiness": -0.05},
-    ACTION_COMPROMISE: {"love_support":  0.10, "pressure": -0.12, "stability":  0.10, "happiness":  0.08},
-    ACTION_WITHDRAW:   {"love_support": -0.12, "pressure": -0.05, "stability": -0.10, "happiness": -0.03},
+# ── Action formula functions ───────────────────────────────────────────────────
+#
+# Each function computes one agent's ΔY contribution for a single action.
+# Signature: f(x_self, x_other, partner_action) → dict[str, float]
+#
+# Design rules:
+#   - x_self  drives the *quality* of the action (how well they execute it)
+#   - x_other drives *receptiveness* (how the partner receives or reacts)
+#   - partner_action provides context (hard to support someone who is attacking)
+#
+# No action is universally good or bad:
+#   - SUPPORT backfires with a highly rational, non-emotional partner
+#   - COMPROMISE feels cold to a highly emotional partner
+#   - ARGUE is less damaging when done by a high-IQ rational agent (productive friction)
+#   - IGNORE is strategic de-escalation when self has high stability + responsibility
+#   - WITHDRAW always lowers pressure (why people do it), but damages love_support
+#     proportional to emotional shutdown
+#
+# The RL agent must learn which action fits its partner's personality and the
+# current context — not just memorize "support = always good."
+
+# Context modifiers: how partner's action changes MY action's effectiveness.
+# Positive = partner context helps my action; Negative = undermines it.
+# Applied multiplicatively to quality/destructiveness inside each formula.
+_CONTEXT: dict[tuple[int, int], float] = {
+    # My action, partner's action → modifier on MY effectiveness
+    (ACTION_SUPPORT,    ACTION_SUPPORT):    0.20,   # warmth is mutual, quality amplified
+    (ACTION_SUPPORT,    ACTION_ARGUE):     -0.35,   # hard to support someone attacking you
+    (ACTION_SUPPORT,    ACTION_IGNORE):    -0.20,   # support doesn't land with absent partner
+    (ACTION_SUPPORT,    ACTION_COMPROMISE): 0.10,   # compatible context
+    (ACTION_SUPPORT,    ACTION_WITHDRAW):  -0.15,   # partner isn't fully present
+
+    (ACTION_ARGUE,      ACTION_SUPPORT):   -0.15,   # being supported slightly de-escalates
+    (ACTION_ARGUE,      ACTION_ARGUE):      0.30,   # mutual escalation amplifies damage
+    (ACTION_ARGUE,      ACTION_IGNORE):     0.20,   # stonewalling enrages, argue worsens
+    (ACTION_ARGUE,      ACTION_COMPROMISE):-0.20,   # offer to negotiate absorbs some anger
+    (ACTION_ARGUE,      ACTION_WITHDRAW):   0.15,   # pursuer-distancer: argue intensifies
+
+    (ACTION_IGNORE,     ACTION_SUPPORT):    0.10,   # ignoring a supporter feels worse (guilt/damage)
+    (ACTION_IGNORE,     ACTION_ARGUE):     -0.20,   # strategic ignore when attacked is most valid
+    (ACTION_IGNORE,     ACTION_IGNORE):     0.25,   # mutual neglect compounds
+    (ACTION_IGNORE,     ACTION_COMPROMISE): 0.20,   # ignoring someone trying is especially bad
+    (ACTION_IGNORE,     ACTION_WITHDRAW):   0.10,   # parallel disengagement compounds
+
+    (ACTION_COMPROMISE, ACTION_SUPPORT):    0.15,   # warm environment helps compromise land
+    (ACTION_COMPROMISE, ACTION_ARGUE):     -0.15,   # hard to negotiate when under attack
+    (ACTION_COMPROMISE, ACTION_IGNORE):    -0.30,   # effort wasted when ignored
+    (ACTION_COMPROMISE, ACTION_COMPROMISE): 0.25,   # mutual problem-solving most effective
+    (ACTION_COMPROMISE, ACTION_WITHDRAW):  -0.15,   # compromising with someone checked out
+
+    (ACTION_WITHDRAW,   ACTION_SUPPORT):    0.20,   # withdrawing from a supporter = rejection; more damage
+    (ACTION_WITHDRAW,   ACTION_ARGUE):     -0.25,   # withdrawal as de-escalation is most justified
+    (ACTION_WITHDRAW,   ACTION_IGNORE):     0.10,   # mutual disconnection compounds
+    (ACTION_WITHDRAW,   ACTION_COMPROMISE): 0.15,   # withdrawing when partner is trying = bad
+    (ACTION_WITHDRAW,   ACTION_WITHDRAW):   0.10,   # mutual retreat compounds
 }
 
 
-def x_scale_factor(action: int, x: XTraits) -> float:
+def _support_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
     """
-    Return a multiplier in [0.5, 1.5] that scales an action's effect
-    based on the agent's relevant X traits.
+    Support quality = avg(eq, ability_to_love).
+    Receptiveness = avg(partner eq, partner emotional_reasoning).
 
-    Higher relevant traits → more effective positive actions,
-    more damaging negative ones (e.g. a low-stability agent's arguing hurts more).
-    Uses effective() so the innate baseline is respected.
+    Backfire condition: if partner's rational_thinking >> emotional_reasoning,
+    they interpret unsolicited support as patronizing or controlling.
+    The love_support delta can go negative for highly rational, non-emotional partners.
     """
-    if action == ACTION_SUPPORT:
-        return 0.5 + (x.effective("eq") + x.effective("kindness") + x.effective("ability_to_love")) / 3.0
-    elif action == ACTION_ARGUE:
-        return 0.5 + (1.0 - x.effective("mental_stability"))
-    elif action == ACTION_IGNORE:
-        return 1.0
-    elif action == ACTION_COMPROMISE:
-        return 0.5 + (x.effective("rational_thinking") + x.effective("eq")) / 2.0
-    elif action == ACTION_WITHDRAW:
-        return 1.0
-    return 1.0
+    quality    = (x_self.effective("eq") + x_self.effective("ability_to_love")) / 2.0
+    receptive  = (x_other.effective("eq") + x_other.effective("emotional_reasoning")) / 2.0
+    # How much more rational than emotional is the partner?
+    # Positive gap → support feels like interference, not comfort.
+    rational_gap = max(0.0, x_other.effective("rational_thinking") - x_other.effective("emotional_reasoning"))
+
+    context = _CONTEXT.get((ACTION_SUPPORT, partner_action), 0.0)
+    effective_quality = quality * (1.0 + context)
+
+    return {
+        "love_support": 0.20 * effective_quality * receptive - rational_gap * 0.10,
+        "pressure":    -0.12 * quality,                        # always reduces pressure regardless
+        "stability":    0.10 * effective_quality * receptive,
+        "happiness":    0.08 * effective_quality * receptive - rational_gap * 0.05,
+    }
+
+
+def _argue_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
+    """
+    Destructiveness = 0.5 + 0.5*(1 - mental_stability): unstable agents do more damage.
+    Productive friction: high iq * rational_thinking → argument surfaces real issues,
+    slightly reducing the damage to stability and love_support (but never making argue good).
+    """
+    destructiveness = 0.5 + 0.5 * (1.0 - x_self.effective("mental_stability"))
+    productive      = x_self.effective("iq") * x_self.effective("rational_thinking") * 0.3
+
+    context = _CONTEXT.get((ACTION_ARGUE, partner_action), 0.0)
+    net_destructiveness = destructiveness * (1.0 + context)
+
+    return {
+        "love_support": -0.28 * net_destructiveness + productive * 0.06,
+        "pressure":      0.22 * net_destructiveness,
+        "stability":    -0.18 * net_destructiveness + productive * 0.05,
+        "happiness":    -0.10 * net_destructiveness + productive * 0.03,
+    }
+
+
+def _ignore_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
+    """
+    Strategic ignore (high mental_stability + responsibility) = de-escalation.
+    Chronic ignore (low both) = neglect.
+    Partner's eq + ability_to_love determines how acutely they feel the absence.
+    """
+    strategic = (x_self.effective("mental_stability") + x_self.effective("responsibility")) / 2.0
+    neglect   = 1.0 - strategic
+    partner_sensitivity = (x_other.effective("eq") + x_other.effective("ability_to_love")) / 2.0
+
+    context = _CONTEXT.get((ACTION_IGNORE, partner_action), 0.0)
+    # Context amplifies neglect, not strategic value
+    net_neglect = neglect * (1.0 + context)
+
+    return {
+        "love_support": -0.15 * net_neglect - partner_sensitivity * 0.06,
+        "pressure":     -0.06 * strategic + 0.04 * net_neglect,  # strategic lowers pressure
+        "stability":    -0.10 * net_neglect + 0.02 * strategic,
+        "happiness":    -0.05 * net_neglect,
+    }
+
+
+def _compromise_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
+    """
+    Effectiveness requires rational_thinking + iq to execute well.
+    Backfire condition: if partner's emotional_reasoning >> rational_thinking,
+    compromise feels cold and transactional — love_support can go slightly negative.
+    """
+    rationality = (x_self.effective("rational_thinking") + x_self.effective("iq")) / 2.0
+    # How much more emotional than rational is the partner?
+    # Positive gap → compromise feels dismissive of their feelings.
+    emotional_gap = max(0.0, x_other.effective("emotional_reasoning") - x_other.effective("rational_thinking"))
+
+    context = _CONTEXT.get((ACTION_COMPROMISE, partner_action), 0.0)
+    effective_rationality = rationality * (1.0 + context)
+
+    return {
+        "love_support":  0.12 * effective_rationality - emotional_gap * 0.10,
+        "pressure":     -0.15 * rationality,               # always reduces pressure
+        "stability":     0.15 * effective_rationality,
+        "happiness":     0.08 * effective_rationality - emotional_gap * 0.05,
+    }
+
+
+def _withdraw_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
+    """
+    Withdraw always reduces pressure — that's why people do it.
+    Emotional shutdown (low ability_to_love + eq) = damage to love_support.
+    Healthy space-taking (high mental_stability + eq) = minimal damage.
+    Partner with high attachment feels the abandonment more acutely.
+    """
+    emotional_presence = (x_self.effective("ability_to_love") + x_self.effective("eq")) / 2.0
+    shutdown = 1.0 - emotional_presence
+    partner_attachment = (x_other.effective("ability_to_love") + x_other.effective("eq")) / 2.0
+
+    context = _CONTEXT.get((ACTION_WITHDRAW, partner_action), 0.0)
+    net_shutdown = shutdown * (1.0 + context)
+
+    return {
+        "love_support": -0.15 * net_shutdown - partner_attachment * 0.05,
+        "pressure":     -0.10,                  # always lowers pressure (intentional)
+        "stability":    -0.12 * net_shutdown,
+        "happiness":    -0.05 * net_shutdown,
+    }
+
+
+_ACTION_FORMULAS: dict[int, Callable[[XTraits, XTraits, int], dict[str, float]]] = {
+    ACTION_SUPPORT:    _support_delta,
+    ACTION_ARGUE:      _argue_delta,
+    ACTION_IGNORE:     _ignore_delta,
+    ACTION_COMPROMISE: _compromise_delta,
+    ACTION_WITHDRAW:   _withdraw_delta,
+}
+
+
+def _action_delta(action: int, x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
+    """Dispatch to the correct action formula."""
+    return _ACTION_FORMULAS[action](x_self, x_other, partner_action)
+
+
+# ── Pair-level emergent effects ───────────────────────────────────────────────
+#
+# Effects that emerge from the *combination* of both actions — beyond what
+# either agent's individual formula already captures.
+# Only non-trivial pairs are listed; all others have no extra effect.
+
+_PAIR_EXTRAS: dict[tuple[int, int], dict[str, float]] = {
+    # Mutual warmth: emotional climate synergy
+    (ACTION_SUPPORT, ACTION_SUPPORT):       {"love_support":  0.05, "happiness":  0.04},
+    # Joint problem-solving: solutions that stick
+    (ACTION_COMPROMISE, ACTION_COMPROMISE): {"stability":  0.04},
+    # Mutual escalation: spiral beyond individual damage
+    (ACTION_ARGUE, ACTION_ARGUE):           {"love_support": -0.06, "stability": -0.06, "pressure": 0.06},
+    # Stonewall: one attacks, one shuts down — relationship damage beyond both actions
+    (ACTION_ARGUE, ACTION_IGNORE):          {"love_support": -0.06, "stability": -0.05, "pressure": 0.06},
+    (ACTION_IGNORE, ACTION_ARGUE):          {"love_support": -0.06, "stability": -0.05, "pressure": 0.06},
+    # Mutual disengagement
+    (ACTION_IGNORE, ACTION_IGNORE):         {"love_support": -0.04, "stability": -0.04},
+    (ACTION_WITHDRAW, ACTION_WITHDRAW):     {"love_support": -0.04, "stability": -0.06},
+    # Pursuer-distancer under conflict
+    (ACTION_ARGUE, ACTION_WITHDRAW):        {"love_support": -0.04, "pressure":  0.04},
+    (ACTION_WITHDRAW, ACTION_ARGUE):        {"love_support": -0.04, "pressure":  0.04},
+}
 
 
 # ── Trait-dependent event probability modifiers ───────────────────────────────
@@ -89,76 +261,6 @@ _TRAIT_PROB_MODIFIERS: dict[str, Callable[[XTraits, XTraits], float]] = {
     "mental_health_episode": lambda h, w: (
         1.0 + 0.4 * (1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0)
     ),
-}
-
-
-# ── Action interaction table ──────────────────────────────────────────────────
-#
-# Defines how the *combination* of both agents' actions plays out.
-# Each entry: (action_h, action_w) → (scale_h, scale_w, extra_delta)
-#
-#   scale_h  — multiplier on H's individual action effect given W's response.
-#              < 1.0 means W's response undermines H's action.
-#              > 1.0 means W's response amplifies H's action.
-#   scale_w  — same from W's perspective.
-#   extra_delta — Y changes that emerge from the dynamic itself, beyond what
-#                 either agent's individual action produces (e.g. stonewall
-#                 penalty, mutual-support synergy).
-#
-# Pairs not listed default to (1.0, 1.0, {}) — no interaction effect.
-
-_ACTION_INTERACTIONS: dict[tuple[int, int], _Interaction] = {
-    # ── Both constructive ─────────────────────────────────────────────────────
-    # Mutual support: warmth amplifies warmth
-    (ACTION_SUPPORT, ACTION_SUPPORT):       (1.3, 1.3, {"love_support":  0.06, "happiness":  0.04}),
-    # Support meets compromise: constructive alignment
-    (ACTION_SUPPORT, ACTION_COMPROMISE):    (1.1, 1.1, {}),
-    (ACTION_COMPROMISE, ACTION_SUPPORT):    (1.1, 1.1, {}),
-    # Both willing to negotiate: solutions actually stick
-    (ACTION_COMPROMISE, ACTION_COMPROMISE): (1.2, 1.2, {"stability":  0.05}),
-
-    # ── Both disengaging ─────────────────────────────────────────────────────
-    # Mutual silence: relationship fades without conflict
-    (ACTION_IGNORE, ACTION_IGNORE):       (1.0, 1.0, {"love_support": -0.08, "stability": -0.06}),
-    # Both pulling back emotionally: slow disconnection
-    (ACTION_WITHDRAW, ACTION_WITHDRAW):   (1.0, 1.0, {"love_support": -0.06, "stability": -0.10}),
-    # One stonewalls, other retreats: parallel disengagement
-    (ACTION_WITHDRAW, ACTION_IGNORE):     (1.0, 1.0, {"love_support": -0.05, "stability": -0.05}),
-    (ACTION_IGNORE, ACTION_WITHDRAW):     (1.0, 1.0, {"love_support": -0.05, "stability": -0.05}),
-
-    # ── Both destructive ─────────────────────────────────────────────────────
-    # Full mutual conflict: escalation compounds damage
-    (ACTION_ARGUE, ACTION_ARGUE): (1.3, 1.3, {"love_support": -0.08, "stability": -0.08, "pressure": 0.08}),
-
-    # ── Constructive vs destructive ───────────────────────────────────────────
-    # Support vs argue: argue wins; supporter's effort is undermined
-    (ACTION_SUPPORT, ACTION_ARGUE): (0.5, 1.2, {"pressure":  0.06}),
-    (ACTION_ARGUE, ACTION_SUPPORT): (1.2, 0.5, {"pressure":  0.06}),
-    # Compromise vs argue: offer to negotiate partially absorbs the attack
-    (ACTION_COMPROMISE, ACTION_ARGUE): (0.7, 0.9, {"pressure":  0.04}),
-    (ACTION_ARGUE, ACTION_COMPROMISE): (0.9, 0.7, {"pressure":  0.04}),
-
-    # ── Constructive vs disengaged ────────────────────────────────────────────
-    # Support vs ignore: care goes unreciprocated — one-sided and isolating
-    (ACTION_SUPPORT, ACTION_IGNORE): (0.6, 1.0, {"love_support": -0.04}),
-    (ACTION_IGNORE, ACTION_SUPPORT): (1.0, 0.6, {"love_support": -0.04}),
-    # Support vs withdraw: classic pursuer-distancer strain
-    (ACTION_SUPPORT, ACTION_WITHDRAW): (0.7, 1.0, {"love_support": -0.04, "stability": -0.04}),
-    (ACTION_WITHDRAW, ACTION_SUPPORT): (1.0, 0.7, {"love_support": -0.04, "stability": -0.04}),
-    # Compromise vs ignore: good-faith effort met with indifference
-    (ACTION_COMPROMISE, ACTION_IGNORE):   (0.6, 1.0, {"love_support": -0.03}),
-    (ACTION_IGNORE, ACTION_COMPROMISE):   (1.0, 0.6, {"love_support": -0.03}),
-    # Compromise vs withdraw: offer made, partner already gone emotionally
-    (ACTION_COMPROMISE, ACTION_WITHDRAW): (0.7, 1.0, {"stability": -0.03}),
-    (ACTION_WITHDRAW, ACTION_COMPROMISE): (1.0, 0.7, {"stability": -0.03}),
-
-    # ── Destructive vs disengaged ─────────────────────────────────────────────
-    # Argue vs ignore: stonewalling — one of the most damaging dynamics
-    (ACTION_ARGUE, ACTION_IGNORE): (1.2, 1.0, {"love_support": -0.08, "stability": -0.06, "pressure": 0.08}),
-    (ACTION_IGNORE, ACTION_ARGUE): (1.0, 1.2, {"love_support": -0.08, "stability": -0.06, "pressure": 0.08}),
-    # Argue vs withdraw: pursuer-distancer under active conflict
-    (ACTION_ARGUE, ACTION_WITHDRAW): (1.1, 1.0, {"love_support": -0.06, "pressure":  0.05}),
-    (ACTION_WITHDRAW, ACTION_ARGUE): (1.0, 1.1, {"love_support": -0.06, "pressure":  0.05}),
 }
 
 
@@ -244,13 +346,12 @@ class EventCatalog:
         """
         Compute total ΔY for one timestep.
 
-        Order of contributions:
-          1. Base event delta (from YAML)
-          2. Husband's action modifier (scaled by his X traits)
-          3. Wife's action modifier (scaled by her X traits)
-
-        Each agent's action contribution is halved so two agents together
-        don't double the impact of their responses.
+        1. Base event delta (from YAML)
+        2. Each agent's action formula, at half weight so both together don't double-count.
+           Formula takes (x_self, x_other, partner_action) — same action produces
+           different deltas depending on who is doing it and who is receiving it.
+        3. Pair-level emergent effects (_PAIR_EXTRAS): dynamics that arise from
+           the combination and aren't captured by individual formulas.
         """
         delta: dict[str, float] = {}
 
@@ -259,26 +360,16 @@ class EventCatalog:
             for key, val in event["base_delta_y"].items():
                 delta[key] = delta.get(key, 0.0) + val
 
-        # 2. Per-agent action effects, modulated by interaction context.
-        #    scale_h / scale_w encode how the *other* agent's response affects
-        #    the effectiveness of each action — so (support, argue) is not just
-        #    the average of support and argue; the argue actively undermines the
-        #    support (scale_h < 1) and the support doesn't stop the argue (scale_w > 1).
-        scale_h, scale_w, interaction_delta = _ACTION_INTERACTIONS.get(
-            (action_h, action_w), (1.0, 1.0, {})
-        )
-        for action, x, interaction_scale in [
-            (action_h, x_h, scale_h),
-            (action_w, x_w, scale_w),
+        # 2. Per-agent action deltas, each at half weight
+        for d in [
+            _action_delta(action_h, x_h, x_w, action_w),
+            _action_delta(action_w, x_w, x_h, action_h),
         ]:
-            trait_scale = x_scale_factor(action, x)
-            for key, val in _ACTION_BASE[action].items():
-                delta[key] = delta.get(key, 0.0) + val * trait_scale * interaction_scale * 0.5
+            for key, val in d.items():
+                delta[key] = delta.get(key, 0.0) + val * 0.5
 
-        # 3. Interaction delta: effects that emerge from the dynamic itself
-        #    (e.g. stonewall penalty, mutual-support warmth) beyond either
-        #    agent's individual contribution.
-        for key, val in interaction_delta.items():
+        # 3. Emergent pair dynamics
+        for key, val in _PAIR_EXTRAS.get((action_h, action_w), {}).items():
             delta[key] = delta.get(key, 0.0) + val
 
         return delta
