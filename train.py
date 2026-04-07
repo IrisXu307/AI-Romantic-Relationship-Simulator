@@ -31,6 +31,39 @@ from src.agents.agent import Agent
 from src.env.marriage_env import MarriageEnv
 from src.env.state import _TRAIT_NAMES
 
+EVAL_CATEGORIES = {
+    "Financial":    ["job_loss", "promotion", "financial_crisis", "financial_windfall", "financial_disagreement"],
+    "Family":       ["new_child", "parenting_conflict", "family_death"],
+    "Health":       ["health_crisis", "mental_health_episode"],
+    "Relationship": ["infidelity", "emotional_conflict", "romantic_gesture"],
+    "Life Change":  ["relocation", "shared_achievement"],
+}
+
+
+# ── Category evaluation ───────────────────────────────────────────────────────
+
+def evaluate_by_category(env: MarriageEnv, agent_h: Agent, agent_w: Agent, n_eval: int = 50) -> dict:
+    """
+    For each event category, run n_eval episodes where only events from that
+    category can fire (50% chance each step, else no event).
+    Returns mean final happiness per category.
+    """
+    results = {}
+    for cat, event_names in EVAL_CATEGORIES.items():
+        cat_events = [e for e in env.events.events if e["name"] in event_names]
+        happiness_list = []
+        for _ in range(n_eval):
+            obs, _ = env.reset()
+            done = False
+            while not done:
+                env.current_event = random.choice(cat_events) if (cat_events and random.random() < 0.5) else None
+                action_h, _, _ = agent_h.act(obs)
+                action_w, _, _ = agent_w.act(obs)
+                obs, _, done, _, info = env.step([action_h, action_w])
+            happiness_list.append(info["happiness"])
+        results[cat] = float(np.mean(happiness_list))
+    return results
+
 
 # ── Reflection ────────────────────────────────────────────────────────────────
 
@@ -92,8 +125,8 @@ def run_episode(
 
     done = False
     while not done:
-        action_h, log_prob_h = agent_h.act(obs_h)
-        action_w, log_prob_w = agent_w.act(obs_w)
+        action_h, log_prob_h, value_h = agent_h.act(obs_h)
+        action_w, log_prob_w, value_w = agent_w.act(obs_w)
 
         obs_h_next, _scalar_reward, done, _, info = env.step([action_h, action_w])
         obs_w_next = info["obs_w"]
@@ -101,8 +134,8 @@ def run_episode(
         reward_w   = info["reward_w"]
 
         if train:
-            agent_h.store(obs_h, action_h, log_prob_h, reward_h)
-            agent_w.store(obs_w, action_w, log_prob_w, reward_w)
+            agent_h.store(obs_h, action_h, log_prob_h, reward_h, value_h)
+            agent_w.store(obs_w, action_w, log_prob_w, reward_w, value_w)
 
         if info["reflection_triggered"]:
             reflect(env.x_h, info["delta_y"], x_change_magnitude)
@@ -167,6 +200,8 @@ def main():
     parser.add_argument("--seed",       type=int,   default=None)
     parser.add_argument("--log",        default="data/metrics.json")
     parser.add_argument("--save-every", type=int,   default=500)
+    parser.add_argument("--eval-every", type=int,   default=1000, help="Evaluate per-category every N episodes")
+    parser.add_argument("--eval-log",   default="data/eval_history.json")
     parser.add_argument("--plot",       action="store_true", help="Plot training curves after run")
     args = parser.parse_args()
 
@@ -197,12 +232,19 @@ def main():
     print(f"obs_dim={obs_dim}  n_actions={n_actions}  hidden={hidden_dim}  "
           f"lr={lr}  gamma={gamma}  episodes={n_episodes}")
 
+    # PPO hyperparameters
+    clip_eps    = cfg["ppo"]["clip_eps"]
+    ppo_epochs  = cfg["ppo"]["epochs"]
+    gae_lambda  = cfg["ppo"]["gae_lambda"]
+    entropy_coef = cfg["ppo"]["entropy_coef"]
+
     # Agents
-    agent_h = Agent(obs_dim, n_actions, hidden_dim, lr, device)
-    agent_w = Agent(obs_dim, n_actions, hidden_dim, lr, device)
+    agent_h = Agent(obs_dim, n_actions, hidden_dim, lr, device, clip_eps, ppo_epochs, gae_lambda)
+    agent_w = Agent(obs_dim, n_actions, hidden_dim, lr, device, clip_eps, ppo_epochs, gae_lambda)
 
     start_ep   = 0
     all_metrics: list[dict] = []
+    eval_history: list[dict] = []
 
     if args.resume and Path(args.checkpoint).exists():
         start_ep, all_metrics = load_checkpoint(args.checkpoint, agent_h, agent_w)
@@ -220,8 +262,8 @@ def main():
     for ep in range(start_ep, n_episodes):
         ep_info = run_episode(env, agent_h, agent_w, x_change_mag, train=True)
 
-        loss_h_pol, loss_h_val = agent_h.update(gamma)
-        loss_w_pol, loss_w_val = agent_w.update(gamma)
+        loss_h_pol, loss_h_val = agent_h.update(gamma, entropy_coef)
+        loss_w_pol, loss_w_val = agent_w.update(gamma, entropy_coef)
 
         ep_info.update({
             "episode":       ep,
@@ -248,6 +290,16 @@ def main():
         if (ep + 1) % args.save_every == 0:
             save_checkpoint(args.checkpoint, ep + 1, agent_h, agent_w, all_metrics)
 
+        # Per-category evaluation
+        if (ep + 1) % args.eval_every == 0:
+            ckpt_path = Path(args.checkpoint).parent / f"ep_{ep+1}.pt"
+            save_checkpoint(str(ckpt_path), ep + 1, agent_h, agent_w, all_metrics)
+            cat_scores = evaluate_by_category(env, agent_h, agent_w, n_eval=200)
+            cat_scores["episode"] = ep + 1
+            eval_history.append(cat_scores)
+            scores_str = "  ".join(f"{k}={v:.3f}" for k, v in cat_scores.items() if k != "episode")
+            print(f"  [eval ep={ep+1}] {scores_str}")
+
     elapsed = time.time() - t0
     print(f"\nDone — {elapsed:.1f}s total  ({elapsed / n_episodes * 1000:.1f} ms/ep)")
 
@@ -255,9 +307,14 @@ def main():
     save_checkpoint(args.checkpoint, n_episodes, agent_h, agent_w, all_metrics)
     Path(args.log).parent.mkdir(parents=True, exist_ok=True)
     with open(args.log, "w") as f:
-        json.dump(all_metrics, f)
+        json.dump(all_metrics, f, indent=2)
     print(f"Checkpoint → {args.checkpoint}")
     print(f"Metrics    → {args.log}")
+    if eval_history:
+        Path(args.eval_log).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.eval_log, "w") as f:
+            json.dump(eval_history, f, indent=2)
+        print(f"Eval log   → {args.eval_log}")
 
     # Optional training curves
     if args.plot:
