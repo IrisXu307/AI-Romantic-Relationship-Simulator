@@ -33,6 +33,12 @@ reward:
 training:
   learning_rate: 0.001
   gamma: 0.99        # discount factor for future rewards
-  episodes: 10000
+  episodes: 100000
   hidden_dim: 64
   seed: 42
+
+ppo:
+  clip_eps: 0.2      # PPO clipping epsilon
+  epochs: 4          # update passes per episode
+  gae_lambda: 0.95   # GAE smoothing factor
+  entropy_coef: 0.01 # entropy bonus weight

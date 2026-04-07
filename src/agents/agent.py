@@ -9,9 +9,10 @@ class Agent:
     """
     Wraps a PolicyNet + ValueNet for one partner (husband or wife).
 
-    Stores the episode trajectory internally, then computes a REINFORCE
-    update with a learned value baseline (advantage = G_t - V(s_t)).
-    Gradient clipping is applied to keep training stable.
+    Uses PPO (Proximal Policy Optimization) with:
+    - Clipped surrogate objective
+    - Generalized Advantage Estimation (GAE)
+    - Multiple update epochs per episode
     """
 
     def __init__(
@@ -21,80 +22,110 @@ class Agent:
         hidden_dim: int,
         lr: float,
         device: torch.device,
+        clip_eps: float = 0.2,
+        ppo_epochs: int = 4,
+        gae_lambda: float = 0.95,
     ):
         self.device = device
+        self.clip_eps = clip_eps
+        self.ppo_epochs = ppo_epochs
+        self.gae_lambda = gae_lambda
+
         self.policy = PolicyNet(obs_dim, n_actions, hidden_dim).to(device)
         self.value  = ValueNet(obs_dim, hidden_dim).to(device)
         self.optimizer = torch.optim.Adam(
             list(self.policy.parameters()) + list(self.value.parameters()),
             lr=lr,
         )
-        self._trajectory: list[tuple] = []  # (obs, action, log_prob, reward)
+        self._trajectory: list[tuple] = []  # (obs, action, log_prob, reward, value)
 
     # ── Episode collection ─────────────────────────────────────────────────────
 
-    def act(self, obs: np.ndarray) -> tuple[int, torch.Tensor]:
-        """Select an action from the current policy (no grad needed here)."""
+    def act(self, obs: np.ndarray) -> tuple[int, torch.Tensor, float]:
+        """Sample action; return (action, log_prob, value_estimate)."""
         obs_t = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():
             action, log_prob = self.policy.act(obs_t)
-        return action, log_prob
+            value = self.value(obs_t).item()
+        return action, log_prob, value
 
-    def store(self, obs: np.ndarray, action: int, log_prob: torch.Tensor, reward: float):
-        self._trajectory.append((obs, action, log_prob, reward))
+    def store(self, obs: np.ndarray, action: int, log_prob: torch.Tensor,
+              reward: float, value: float):
+        self._trajectory.append((obs, action, log_prob, reward, value))
 
     def clear(self):
         self._trajectory.clear()
 
-    # ── Policy update ──────────────────────────────────────────────────────────
+    # ── PPO update ─────────────────────────────────────────────────────────────
 
     def update(self, gamma: float, entropy_coef: float = 0.01) -> tuple[float, float]:
         """
-        Run one REINFORCE update over the stored episode trajectory.
-        Returns (policy_loss, value_loss) as Python floats.
+        Run PPO update over the stored episode trajectory.
+        Returns (mean_policy_loss, mean_value_loss) across epochs.
         """
         if not self._trajectory:
             return 0.0, 0.0
 
-        obs_list, actions, _log_probs, rewards = zip(*self._trajectory)
+        obs_list, actions, old_log_probs, rewards, values = zip(*self._trajectory)
 
-        # Discounted returns G_t = r_t + γ·r_{t+1} + ...
-        returns: list[float] = []
-        G = 0.0
-        for r in reversed(rewards):
-            G = r + gamma * G
-            returns.insert(0, G)
+        obs_t    = torch.tensor(np.array(obs_list), dtype=torch.float32, device=self.device)
+        acts_t   = torch.tensor(actions, dtype=torch.long, device=self.device)
+        old_lp_t = torch.stack(list(old_log_probs)).detach().to(self.device)
 
-        obs_t  = torch.tensor(np.array(obs_list), dtype=torch.float32, device=self.device)
-        acts_t = torch.tensor(actions, dtype=torch.long,  device=self.device)
-        ret_t  = torch.tensor(returns,  dtype=torch.float32, device=self.device)
+        vals_np    = np.array(values,  dtype=np.float32)
+        rewards_np = np.array(rewards, dtype=np.float32)
 
-        # Normalize returns for training stability
+        # Generalized Advantage Estimation (GAE)
+        advantages = np.zeros_like(rewards_np)
+        gae = 0.0
+        for t in reversed(range(len(rewards_np))):
+            next_val = vals_np[t + 1] if t + 1 < len(vals_np) else 0.0
+            delta = rewards_np[t] + gamma * next_val - vals_np[t]
+            gae = delta + gamma * self.gae_lambda * gae
+            advantages[t] = gae
+
+        returns = advantages + vals_np  # GAE returns as value targets
+
+        adv_t = torch.tensor(advantages, dtype=torch.float32, device=self.device)
+        ret_t = torch.tensor(returns,    dtype=torch.float32, device=self.device)
+
+        # Normalize advantages
+        if adv_t.numel() > 1:
+            adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
+
+        # Normalize returns for value loss
         if ret_t.numel() > 1:
-            ret_t = (ret_t - ret_t.mean()) / (ret_t.std() + 1e-8)
+            ret_norm = (ret_t - ret_t.mean()) / (ret_t.std() + 1e-8)
+        else:
+            ret_norm = ret_t
 
-        # Advantage = G_t - V(s_t)  (detach value so it doesn't affect policy grad)
-        values     = self.value(obs_t)
-        advantages = ret_t - values.detach()
+        total_pol_loss = 0.0
+        total_val_loss = 0.0
 
-        # Policy loss: -E[log π(a|s) · A]  minus entropy bonus
-        log_probs = self.policy.log_prob(obs_t, acts_t)
-        entropy   = self.policy.entropy(obs_t).mean()
-        policy_loss = -(log_probs * advantages).mean() - entropy_coef * entropy
+        for _ in range(self.ppo_epochs):
+            new_log_probs = self.policy.log_prob(obs_t, acts_t)
+            entropy       = self.policy.entropy(obs_t).mean()
 
-        # Value loss: MSE(V(s), G_t)
-        value_loss = nn.functional.mse_loss(values, ret_t)
+            # Clipped surrogate objective
+            ratio  = torch.exp(new_log_probs - old_lp_t)
+            surr1  = ratio * adv_t
+            surr2  = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * adv_t
+            policy_loss = -torch.min(surr1, surr2).mean() - entropy_coef * entropy
 
-        loss = policy_loss + 0.5 * value_loss
+            # Value loss
+            value_loss = nn.functional.mse_loss(self.value(obs_t), ret_norm)
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        nn.utils.clip_grad_norm_(
-            list(self.policy.parameters()) + list(self.value.parameters()),
-            max_norm=0.5,
-        )
-        self.optimizer.step()
+            loss = policy_loss + 0.5 * value_loss
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(
+                list(self.policy.parameters()) + list(self.value.parameters()),
+                max_norm=0.5,
+            )
+            self.optimizer.step()
+
+            total_pol_loss += policy_loss.item()
+            total_val_loss += value_loss.item()
+
         self.clear()
-
-        return policy_loss.item(), value_loss.item()
-
+        return total_pol_loss / self.ppo_epochs, total_val_loss / self.ppo_epochs
