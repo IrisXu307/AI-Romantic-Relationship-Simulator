@@ -276,7 +276,7 @@ def main():
         window.append(ep_info)
 
         # Console log every 50 episodes
-        if (ep + 1) % 50 == 0 or ep == start_ep:
+        if (ep + 1) % 1000 == 0 or ep == start_ep:
             keys = ["reward_h", "reward_w", "mean_happiness",
                     "mean_stability", "reflections", "loss_h_policy"]
             avg = {k: float(np.mean([m[k] for m in window])) for k in keys}
