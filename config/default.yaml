@@ -6,10 +6,13 @@ agents:
   # X traits are sampled uniformly from [x_init_low, x_init_high] at episode start
   x_init_low: 0.05
   x_init_high: 0.95
-  # Base std for perceptual noise added to observations.
+  # Base std for perceptual noise added to self-observations.
   # Actual noise std = obs_noise_scale * (1 - effective_eq).
-  # Agents with higher EQ perceive themselves and their partner more accurately.
+  # Agents with higher EQ perceive themselves more accurately.
   obs_noise_scale: 0.05
+  # Base std for partner-model noise. Actual noise std = partner_obs_noise_scale * (1 - trust).
+  # High trust → partner traits estimated accurately; low trust → noisy partner model.
+  partner_obs_noise_scale: 0.08
 
 reflection:
   # |delta_y| on any single Y variable must exceed this to trigger reflection

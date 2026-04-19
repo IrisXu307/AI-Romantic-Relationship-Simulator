@@ -38,20 +38,29 @@ from src.env.state import _TRAIT_NAMES, X_DIM
 # Each run injects these traits into both agents and records what they choose.
 
 ARCHETYPES: dict[str, dict[str, float]] = {
-    "emotional":  dict(eq=0.9, emotional_reasoning=0.9, ability_to_love=0.9,
-                       iq=0.4,  rational_thinking=0.1, kindness=0.8,
-                       faithfulness=0.7, responsibility=0.5, mental_stability=0.5),
-    "rational":   dict(iq=0.9, rational_thinking=0.9, eq=0.4,
-                       emotional_reasoning=0.1, ability_to_love=0.4,
-                       kindness=0.5, faithfulness=0.7, responsibility=0.8,
-                       mental_stability=0.7),
-    "avoidant":   dict(mental_stability=0.2, eq=0.2, ability_to_love=0.2,
-                       emotional_reasoning=0.2, kindness=0.3,
-                       iq=0.5, rational_thinking=0.5, faithfulness=0.4,
-                       responsibility=0.3),
-    "secure":     dict(mental_stability=0.9, faithfulness=0.9, kindness=0.9,
+    # Secure: emotionally intelligent, stable, loving, reliable — the gold standard.
+    # Non-defining traits (iq, rational_thinking) = 0.5.
+    "secure":     dict(mental_stability=0.9, faithfulness=0.9, kindness=0.85,
                        eq=0.85, ability_to_love=0.85, emotional_reasoning=0.75,
-                       iq=0.65, rational_thinking=0.65, responsibility=0.85),
+                       responsibility=0.8,
+                       iq=0.5, rational_thinking=0.5),
+    # Anxious attachment: emotionally intense, craves connection, mentally volatile.
+    # Non-defining traits (iq, rational_thinking, kindness, faithfulness, responsibility) = 0.5.
+    "emotional":  dict(eq=0.85, emotional_reasoning=0.85, ability_to_love=0.9,
+                       mental_stability=0.3,
+                       iq=0.5, rational_thinking=0.5, kindness=0.5,
+                       faithfulness=0.5, responsibility=0.5),
+    # Dismissive attachment: logic-driven, emotionally reserved, suppresses feelings.
+    # Non-defining traits (kindness, faithfulness, responsibility, mental_stability) = 0.5.
+    "rational":   dict(iq=0.85, rational_thinking=0.85, eq=0.3,
+                       emotional_reasoning=0.25,
+                       kindness=0.5, faithfulness=0.5, responsibility=0.5,
+                       mental_stability=0.5, ability_to_love=0.5),
+    # Fearful-avoidant: fears intimacy, distrusts love, low emotional literacy, unreliable.
+    # Non-defining traits (iq, rational_thinking, kindness, responsibility) = 0.5.
+    "avoidant":   dict(eq=0.2, ability_to_love=0.15, emotional_reasoning=0.2,
+                       mental_stability=0.25, faithfulness=0.35,
+                       iq=0.5, rational_thinking=0.5, kindness=0.5, responsibility=0.5),
 }
 
 

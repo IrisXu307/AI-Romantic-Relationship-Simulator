@@ -307,3 +307,94 @@ def test_trust_increases_when_partner_supports(env, neutral_x):
     catalog = env.events
     d_h, _ = catalog.compute_delta_y(None, 1, 0, neutral_x, neutral_x)  # H argues, W supports
     assert d_h.get("trust", 0) > 0
+
+
+# ── Phase 2: life stage ───────────────────────────────────────────────────────
+
+def test_life_stage_zero_at_episode_start(env):
+    obs, _ = env.reset(seed=0)
+    assert obs[-1] == pytest.approx(0.0, abs=1e-5)
+
+def test_life_stage_increases_after_step(env):
+    env.reset(seed=0)
+    obs, *_ = env.step(env.action_space.sample())
+    expected = 1.0 / (env.age_end - env.age_start)
+    assert obs[-1] == pytest.approx(expected, abs=1e-4)
+
+def test_life_stage_in_info(env):
+    env.reset(seed=0)
+    _, _, _, _, info = env.step(env.action_space.sample())
+    assert "life_stage" in info
+    assert 0.0 <= info["life_stage"] <= 1.0
+
+
+# ── Phase 2: partner model (obscured traits) ──────────────────────────────────
+
+def test_partner_obs_exact_at_max_trust(env):
+    """At trust=1.0 partner noise is zero; partner slice equals true partner traits."""
+    from src.env.state import X_DIM
+    env.reset(seed=42)
+    env.y_h.trust = 1.0
+    obs_h = env._get_obs("h")
+    partner_slice = obs_h[X_DIM : 2 * X_DIM]
+    true_partner  = env.x_w.to_array()
+    np.testing.assert_array_almost_equal(partner_slice, true_partner, decimal=4)
+
+def test_partner_obs_varies_at_zero_trust(env):
+    """At trust=0.0 partner noise is maximal; two calls should differ."""
+    from src.env.state import X_DIM
+    env.reset(seed=1)
+    env.y_h.trust = 0.0
+    obs_a = env._get_obs("h")[X_DIM : 2 * X_DIM]
+    obs_b = env._get_obs("h")[X_DIM : 2 * X_DIM]
+    assert not np.array_equal(obs_a, obs_b)
+
+
+# ── Phase 2: event habituation ────────────────────────────────────────────────
+
+def test_habituation_reduces_base_delta(env, neutral_x):
+    """habituation=0.5 should make the negative base event delta less extreme."""
+    catalog = env.events
+    event = next(e for e in catalog.events if e["name"] == "emotional_conflict")
+    d_h_full, _ = catalog.compute_delta_y(event, 3, 3, neutral_x, neutral_x, habituation=1.0)
+    d_h_hab,  _ = catalog.compute_delta_y(event, 3, 3, neutral_x, neutral_x, habituation=0.5)
+    assert d_h_hab.get("love_support", 0) > d_h_full.get("love_support", 0)
+
+def test_habituation_does_not_affect_trust_resentment(env, neutral_x):
+    """Trust/resentment come from action formulas, not base event — unaffected by habituation."""
+    catalog = env.events
+    event = next(e for e in catalog.events if e["name"] == "emotional_conflict")
+    d_full, _ = catalog.compute_delta_y(event, 0, 1, neutral_x, neutral_x, habituation=1.0)
+    d_hab,  _ = catalog.compute_delta_y(event, 0, 1, neutral_x, neutral_x, habituation=0.5)
+    assert d_full.get("trust") == d_hab.get("trust")
+    assert d_full.get("resentment") == d_hab.get("resentment")
+
+def test_event_counts_accumulate_in_episode(env):
+    env.reset(seed=0)
+    new_child = next(e for e in env.events.events if e["name"] == "new_child")
+    env.current_event = new_child
+    env.step(env.action_space.sample())
+    assert env._event_counts.get("new_child", 0) == 1
+    env.current_event = new_child
+    env.step(env.action_space.sample())
+    assert env._event_counts.get("new_child", 0) == 2
+
+def test_event_counts_reset_between_episodes(env):
+    env.reset(seed=0)
+    new_child = next(e for e in env.events.events if e["name"] == "new_child")
+    env.current_event = new_child
+    env.step(env.action_space.sample())
+    env.reset(seed=1)
+    assert env._event_counts == {}
+
+def test_stage_prob_new_child_falls_with_age(env):
+    from src.env.state import XTraits
+    x = XTraits()
+    idx = env.events.names.index("new_child")
+    assert env.events._adjusted_probs(x, x, age=25)[idx] > env.events._adjusted_probs(x, x, age=55)[idx]
+
+def test_stage_prob_health_crisis_rises_with_age(env):
+    from src.env.state import XTraits
+    x = XTraits()
+    idx = env.events.names.index("health_crisis")
+    assert env.events._adjusted_probs(x, x, age=70)[idx] > env.events._adjusted_probs(x, x, age=30)[idx]

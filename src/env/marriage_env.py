@@ -54,6 +54,7 @@ class MarriageEnv(gym.Env):
         self._x_init_low:  float = cfg["agents"]["x_init_low"]
         self._x_init_high: float = cfg["agents"]["x_init_high"]
         self._obs_noise_scale: float = cfg["agents"]["obs_noise_scale"]
+        self._partner_obs_noise_scale: float = cfg["agents"]["partner_obs_noise_scale"]
         self._reflection_threshold: float = cfg["reflection"]["threshold"]
 
         # Base reward weights — scaled by age inside _compute_rewards()
@@ -67,7 +68,8 @@ class MarriageEnv(gym.Env):
 
         self.events = EventCatalog(events_path)
 
-        obs_dim = X_DIM + X_DIM + Y_DIM + (self.events.n_events + 1)
+        # +1 for life_stage_frac appended to every observation
+        obs_dim = X_DIM + X_DIM + Y_DIM + (self.events.n_events + 1) + 1
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -81,6 +83,7 @@ class MarriageEnv(gym.Env):
         self.age: int = self.age_start
         self.current_event: Optional[dict] = None
         self._distress_streak: int = 0       # consecutive steps in divorce-risk territory
+        self._event_counts: dict[str, int] = {}  # how many times each event has fired this episode
 
     # ── Core Gymnasium interface ───────────────────────────────────────────────
 
@@ -95,7 +98,8 @@ class MarriageEnv(gym.Env):
         self.y_w = YState()
         self.age = self.age_start
         self._distress_streak = 0
-        self.current_event = self.events.sample(self.x_h, self.x_w)
+        self._event_counts = {}
+        self.current_event = self.events.sample(self.x_h, self.x_w, age=self.age)
 
         obs_h = self._get_obs("h")
         obs_w = self._get_obs("w")
@@ -105,9 +109,23 @@ class MarriageEnv(gym.Env):
         action_h = int(actions[0])
         action_w = int(actions[1])
 
+        # Event habituation: repeated events have diminishing base impact.
+        # Negative events: 0.85^count floor 0.35 (people numb to chronic stress).
+        # Positive events: 0.90^count floor 0.40 (novelty fades over time).
+        habituation = 1.0
+        if self.current_event:
+            name = self.current_event["name"]
+            count = self._event_counts.get(name, 0)
+            base_sum = sum(self.current_event["base_delta_y"].values())
+            rate = 0.85 if base_sum < 0 else 0.90
+            floor = 0.35 if base_sum < 0 else 0.40
+            habituation = max(rate ** count, floor)
+            self._event_counts[name] = count + 1
+
         # Compute per-partner ΔY (event + actions + trust/resentment)
         delta_h, delta_w = self.events.compute_delta_y(
-            self.current_event, action_h, action_w, self.x_h, self.x_w
+            self.current_event, action_h, action_w, self.x_h, self.x_w,
+            habituation=habituation,
         )
         self.y_h.apply_delta(delta_h)
         self.y_w.apply_delta(delta_w)
@@ -147,13 +165,16 @@ class MarriageEnv(gym.Env):
             reward_h = reward_w = 0.0   # terminal penalty via missed future rewards
             reward = 0.0
 
-        self.current_event = self.events.sample(self.x_h, self.x_w)
+        self.current_event = self.events.sample(self.x_h, self.x_w, age=self.age)
 
         obs_h = self._get_obs("h")
         obs_w = self._get_obs("w")
 
+        life_stage_frac = (self.age - self.age_start) / (self.age_end - self.age_start)
+
         info = {
             "age":                  self.age,
+            "life_stage":           float(life_stage_frac),
             "event":                self.current_event["name"] if self.current_event else "none",
             "delta_h":              delta_h,
             "delta_w":              delta_w,
@@ -186,19 +207,43 @@ class MarriageEnv(gym.Env):
         x_other = self.x_w if agent == "h" else self.x_h
         y_own   = self.y_h if agent == "h" else self.y_w
 
-        raw = np.concatenate([
-            x_self.to_array(),
-            x_other.to_array(),
+        # Self-perception noise: higher EQ → more accurate self-read.
+        # Applied only to x_self — the agent's introspection of their own traits.
+        x_self_arr = x_self.to_array().copy()
+        self_noise_std = self._obs_noise_scale * (1.0 - x_self.effective("eq"))
+        if self_noise_std > 0.0:
+            x_self_arr = np.clip(
+                x_self_arr + self.np_random.normal(
+                    0.0, self_noise_std, size=x_self_arr.shape
+                ).astype(np.float32),
+                0.0, 1.0,
+            )
+
+        # Partner model noise: trust determines how accurately the agent reads their
+        # partner. noise_std = partner_obs_noise_scale × (1 − trust).
+        # At trust=1.0 the partner model is exact; at trust=0.0 it is maximally noisy.
+        x_other_arr = x_other.to_array().copy()
+        partner_noise_std = self._partner_obs_noise_scale * (1.0 - y_own.trust)
+        if partner_noise_std > 0.0:
+            x_other_arr = np.clip(
+                x_other_arr + self.np_random.normal(
+                    0.0, partner_noise_std, size=x_other_arr.shape
+                ).astype(np.float32),
+                0.0, 1.0,
+            )
+
+        # Y state, event, and life_stage are objective observations — no noise.
+        life_stage_frac = np.float32(
+            (self.age - self.age_start) / (self.age_end - self.age_start)
+        )
+
+        return np.concatenate([
+            x_self_arr,
+            x_other_arr,
             y_own.to_array(),
             self.events.one_hot(self.current_event),
+            [life_stage_frac],
         ]).astype(np.float32)
-
-        noise_std = self._obs_noise_scale * (1.0 - x_self.effective("eq"))
-        if noise_std > 0.0:
-            noise = self.np_random.normal(0.0, noise_std, size=raw.shape).astype(np.float32)
-            raw = np.clip(raw + noise, 0.0, 1.0)
-
-        return raw
 
     def _compute_rewards(self) -> tuple[float, float]:
         """

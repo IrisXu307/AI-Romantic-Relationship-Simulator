@@ -252,6 +252,79 @@ _PAIR_EXTRAS: dict[tuple[int, int], dict[str, float]] = {
 }
 
 
+# ── Life-stage event probability modifiers ────────────────────────────────────
+#
+# Each entry maps an event name to a function age → float multiplier.
+# Applied on top of trait modifiers; both are renormalized together so total
+# event frequency is preserved — only the composition shifts across life stages.
+#
+# Design reflects empirically observed lifetime distributions:
+#   - New children: peak 25-35, near-zero after 45
+#   - Health crises: rise sharply after 50
+#   - Job loss / financial friction: higher in early career
+#   - Family death: accelerates as the couple's parents age (couple's 50s+)
+#   - Quality time: rises with empty-nest and retirement (60+)
+
+_STAGE_PROB_MODIFIERS: dict[str, Callable[[int], float]] = {
+    # New child: elevated in 20s, drops off sharply after 35, near-zero after 45
+    "new_child": lambda age: max(
+        0.0, 1.5 - max(0.0, (age - 28) / 8.0)
+    ),
+    # Health crisis: low when young, rises steeply after 50
+    "health_crisis": lambda age: (
+        0.3 + 1.7 * min(1.0, max(0.0, (age - 45) / 30.0))
+    ),
+    # Mental health episodes: modest rise with age and accumulated stress
+    "mental_health_episode": lambda age: (
+        0.7 + 0.6 * min(1.0, max(0.0, (age - 35) / 40.0))
+    ),
+    # Job loss: higher early in career, stabilises after 55
+    "job_loss": lambda age: (
+        1.4 - 0.7 * min(1.0, max(0.0, (age - 25) / 35.0))
+    ),
+    # Promotion: career peak 30-50, falls toward retirement
+    "promotion": lambda age: (
+        0.4 + 1.2 * min(1.0, max(0.0, (age - 28) / 15.0))
+        - 1.0 * min(1.0, max(0.0, (age - 52) / 20.0))
+    ),
+    # Financial disagreement: more acute in budget-tight early years
+    "financial_disagreement": lambda age: (
+        1.5 - 1.0 * min(1.0, max(0.0, (age - 25) / 30.0))
+    ),
+    # Financial crisis: elevated in middle years (mortgage, children's education)
+    "financial_crisis": lambda age: (
+        0.7 + 0.7 * min(1.0, max(0.0, (age - 30) / 20.0))
+        - 0.6 * min(1.0, max(0.0, (age - 55) / 20.0))
+    ),
+    # Family death: accelerates as the couple's parents age (couple in their 50s+)
+    "family_death": lambda age: (
+        0.2 + 1.8 * min(1.0, max(0.0, (age - 45) / 30.0))
+    ),
+    # Parenting conflict: most acute during active parenting (30-50)
+    "parenting_conflict": lambda age: (
+        0.2 + 1.4 * min(1.0, max(0.0, (age - 28) / 12.0))
+        - 1.2 * min(1.0, max(0.0, (age - 50) / 15.0))
+    ),
+    # Relocation: most common in early-career mobility, rare after 60
+    "relocation": lambda age: max(
+        0.1, 1.4 - 1.0 * min(1.0, max(0.0, (age - 25) / 35.0))
+    ),
+    # Shared achievement: peaks in mid-career, falls at retirement
+    "shared_achievement": lambda age: (
+        0.5 + 1.0 * min(1.0, max(0.0, (age - 30) / 15.0))
+        - 0.6 * min(1.0, max(0.0, (age - 55) / 20.0))
+    ),
+    # Quality time: rises with empty-nest / retirement freedom
+    "quality_time": lambda age: (
+        0.6 + 0.8 * min(1.0, max(0.0, (age - 50) / 25.0))
+    ),
+    # Romantic gesture: slightly higher when relationship is young
+    "romantic_gesture": lambda age: (
+        1.3 - 0.5 * min(1.0, max(0.0, (age - 25) / 55.0))
+    ),
+}
+
+
 # ── Trait-dependent event probability modifiers ───────────────────────────────
 #
 # Each entry maps an event name to a function (x_h, x_w) → float multiplier.
@@ -332,19 +405,25 @@ class EventCatalog:
         self.probs: np.ndarray = np.array([e["probability"] for e in self.events], dtype=np.float64)
         self.n_events: int = len(self.events)
 
-    def _adjusted_probs(self, x_h: XTraits, x_w: XTraits) -> np.ndarray:
+    def _adjusted_probs(self, x_h: XTraits, x_w: XTraits, age: int = 25) -> np.ndarray:
         """
-        Compute per-event probabilities adjusted for the couple's current traits.
+        Compute per-event probabilities adjusted for the couple's traits and life stage.
 
-        The total probability mass is preserved (same overall event frequency),
-        but redistributed: e.g. faithful couples face less infidelity risk and
-        more of that mass shifts to other events.
+        Total probability mass is preserved (same overall event frequency),
+        but redistributed across events: e.g. faithful couples face less
+        infidelity risk; older couples face more health crises.
+
+        Both trait modifiers and life-stage modifiers are applied in a single
+        pass, then the distribution is renormalized once.
         """
         probs = self.probs.copy()
         for i, event in enumerate(self.events):
             name = event["name"]
             if name in _TRAIT_PROB_MODIFIERS:
                 modifier = float(np.clip(_TRAIT_PROB_MODIFIERS[name](x_h, x_w), 0.2, 3.0))
+                probs[i] *= modifier
+            if name in _STAGE_PROB_MODIFIERS:
+                modifier = float(np.clip(_STAGE_PROB_MODIFIERS[name](age), 0.0, 3.0))
                 probs[i] *= modifier
         # Rescale to preserve the original total event probability
         original_total = self.probs.sum()
@@ -357,16 +436,17 @@ class EventCatalog:
         self,
         x_h: Optional[XTraits] = None,
         x_w: Optional[XTraits] = None,
+        age: int = 25,
     ) -> Optional[dict]:
         """
         Sample one event or None (no major event this year).
 
         If x_h and x_w are provided, event probabilities are adjusted by
-        the couple's traits before sampling. Remaining probability mass
-        after all events = chance of a quiet year.
+        the couple's traits and life stage before sampling.
+        Remaining probability mass after all events = chance of a quiet year.
         """
         if x_h is not None and x_w is not None:
-            probs = self._adjusted_probs(x_h, x_w)
+            probs = self._adjusted_probs(x_h, x_w, age=age)
         else:
             probs = self.probs
 
@@ -397,6 +477,7 @@ class EventCatalog:
         action_w: int,
         x_h: XTraits,
         x_w: XTraits,
+        habituation: float = 1.0,
     ) -> tuple[dict[str, float], dict[str, float]]:
         """
         Compute per-partner ΔY for one timestep.
@@ -404,18 +485,21 @@ class EventCatalog:
         Returns (delta_h, delta_w) — each partner's subjective experience of the step.
 
         Design:
-          - Base event delta applies equally to both (the event happens to the couple).
+          - Base event delta applies equally to both (the event happens to the couple),
+            scaled by habituation [0, 1]. Repeated events have diminishing base impact.
           - H's subjective state is shaped by W's action toward H: W acts, H receives.
           - W's subjective state is shaped by H's action toward W: H acts, W receives.
           - Pair-level emergent effects are felt equally by both.
           - Trust/resentment accumulate slowly based on the partner's action,
             encoding relationship history into the observation without breaking Markov.
+          - Action formula deltas are NOT habituated — behavioural choices retain
+            full impact regardless of how often an event type recurs.
         """
-        # 1. Base event effect — same for both partners
+        # 1. Base event effect — same for both partners, scaled by habituation
         base: dict[str, float] = {}
         if event is not None:
             for key, val in event["base_delta_y"].items():
-                base[key] = val
+                base[key] = val * habituation
 
         delta_h: dict[str, float] = dict(base)
         delta_w: dict[str, float] = dict(base)
