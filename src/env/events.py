@@ -76,47 +76,52 @@ _CONTEXT: dict[tuple[int, int], float] = {
 
 def _support_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
     """
-    Support quality = avg(eq, ability_to_love).
-    Receptiveness = avg(partner eq, partner emotional_reasoning).
+    Quality = avg(eq, ability_to_love). Receptiveness = avg(partner eq, emotional_reasoning).
+    Backfire: rational_thinking >> emotional_reasoning → support feels patronizing.
 
-    Backfire condition: if partner's rational_thinking >> emotional_reasoning,
-    they interpret unsolicited support as patronizing or controlling.
-    The love_support delta can go negative for highly rational, non-emotional partners.
+    Sensitivity amplifier: receiver's low rational_thinking (< 0.5) means they feel support
+    more deeply — bigger love gain, bigger pressure relief, bigger happiness boost.
+    Mirror of compromise: emotional types thrive on support; rational types on compromise.
     """
-    quality    = (x_self.effective("eq") + x_self.effective("ability_to_love")) / 2.0
-    receptive  = (x_other.effective("eq") + x_other.effective("emotional_reasoning")) / 2.0
-    # How much more rational than emotional is the partner?
-    # Positive gap → support feels like interference, not comfort.
+    quality      = (x_self.effective("eq") + x_self.effective("ability_to_love")) / 2.0
+    receptive    = (x_other.effective("eq") + x_other.effective("emotional_reasoning")) / 2.0
     rational_gap = max(0.0, x_other.effective("rational_thinking") - x_other.effective("emotional_reasoning"))
+    sensitivity  = max(0.0, 0.5 - x_other.effective("rational_thinking")) * 2.0
 
     context = _CONTEXT.get((ACTION_SUPPORT, partner_action), 0.0)
     effective_quality = quality * (1.0 + context)
 
     return {
-        "love_support": 0.20 * effective_quality * receptive - rational_gap * 0.10,
-        "pressure":    -0.12 * quality,                        # always reduces pressure regardless
-        "stability":    0.10 * effective_quality * receptive,
-        "happiness":    0.08 * effective_quality * receptive - rational_gap * 0.05,
+        "love_support": 0.20 * effective_quality * receptive + sensitivity * 0.12 - rational_gap * 0.12,
+        "pressure":    -0.12 * quality - sensitivity * 0.08,
+        "stability":    0.10 * effective_quality * receptive + sensitivity * 0.05,
+        "happiness":    0.08 * effective_quality * receptive + sensitivity * 0.10 - rational_gap * 0.06,
     }
 
 
 def _argue_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
     """
-    Destructiveness = 0.5 + 0.5*(1 - mental_stability): unstable agents do more damage.
-    Productive friction: high iq * rational_thinking → argument surfaces real issues,
-    slightly reducing the damage to stability and love_support (but never making argue good).
+    Destructiveness = 0.5 + 0.5*(1 - mental_stability): unstable actors do more damage.
+    Productive friction: high iq * rational_thinking slightly reduces damage.
+
+    Sensitivity amplifier: receiver's low rational_thinking (< 0.5) means they feel argued-at
+    more intensely — bigger love loss and happiness damage.
+    Instability amplifier: receiver's low mental_stability (< 0.5) means their stability
+    crumbles faster under conflict.
     """
     destructiveness = 0.5 + 0.5 * (1.0 - x_self.effective("mental_stability"))
     productive      = x_self.effective("iq") * x_self.effective("rational_thinking") * 0.3
+    sensitivity     = max(0.0, 0.5 - x_other.effective("rational_thinking")) * 2.0
+    instability     = max(0.0, 0.5 - x_other.effective("mental_stability")) * 2.0
 
     context = _CONTEXT.get((ACTION_ARGUE, partner_action), 0.0)
     net_destructiveness = destructiveness * (1.0 + context)
 
     return {
-        "love_support": -0.28 * net_destructiveness + productive * 0.06,
+        "love_support": -0.28 * net_destructiveness - sensitivity * 0.10 + productive * 0.06,
         "pressure":      0.22 * net_destructiveness,
-        "stability":    -0.18 * net_destructiveness + productive * 0.05,
-        "happiness":    -0.10 * net_destructiveness + productive * 0.03,
+        "stability":    -0.18 * net_destructiveness - instability * 0.06 + productive * 0.05,
+        "happiness":    -0.10 * net_destructiveness - sensitivity * 0.06 + productive * 0.03,
     }
 
 
@@ -124,65 +129,69 @@ def _ignore_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dic
     """
     Strategic ignore (high mental_stability + responsibility) = de-escalation.
     Chronic ignore (low both) = neglect.
-    Partner's eq + ability_to_love determines how acutely they feel the absence.
+
+    Sensitivity amplifier: receiver's low rational_thinking (< 0.5) means they feel
+    abandoned more acutely — bigger love loss and happiness damage from being ignored.
     """
-    strategic = (x_self.effective("mental_stability") + x_self.effective("responsibility")) / 2.0
-    neglect   = 1.0 - strategic
-    partner_sensitivity = (x_other.effective("eq") + x_other.effective("ability_to_love")) / 2.0
+    strategic   = (x_self.effective("mental_stability") + x_self.effective("responsibility")) / 2.0
+    neglect     = 1.0 - strategic
+    sensitivity = max(0.0, 0.5 - x_other.effective("rational_thinking")) * 2.0
 
     context = _CONTEXT.get((ACTION_IGNORE, partner_action), 0.0)
-    # Context amplifies neglect, not strategic value
     net_neglect = neglect * (1.0 + context)
 
     return {
-        "love_support": -0.15 * net_neglect - partner_sensitivity * 0.06,
-        "pressure":     -0.06 * strategic + 0.04 * net_neglect,  # strategic lowers pressure
+        "love_support": -0.15 * net_neglect - sensitivity * 0.08,
+        "pressure":     -0.06 * strategic + 0.04 * net_neglect,
         "stability":    -0.10 * net_neglect + 0.02 * strategic,
-        "happiness":    -0.05 * net_neglect,
+        "happiness":    -0.05 * net_neglect - sensitivity * 0.04,
     }
 
 
 def _compromise_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
     """
     Effectiveness requires rational_thinking + iq to execute well.
-    Backfire condition: if partner's emotional_reasoning >> rational_thinking,
-    compromise feels cold and transactional — love_support can go slightly negative.
+    Backfire: emotional_reasoning >> rational_thinking → compromise feels cold.
+
+    Rational amplifier: receiver's high rational_thinking (> 0.5) means they appreciate
+    structured problem-solving — bigger stability gain, bigger pressure relief, more love.
+    Mirror of support: rational types thrive on compromise; emotional types on support.
     """
-    rationality = (x_self.effective("rational_thinking") + x_self.effective("iq")) / 2.0
-    # How much more emotional than rational is the partner?
-    # Positive gap → compromise feels dismissive of their feelings.
+    rationality   = (x_self.effective("rational_thinking") + x_self.effective("iq")) / 2.0
     emotional_gap = max(0.0, x_other.effective("emotional_reasoning") - x_other.effective("rational_thinking"))
+    rational_amp  = max(0.0, x_other.effective("rational_thinking") - 0.5) * 2.0
 
     context = _CONTEXT.get((ACTION_COMPROMISE, partner_action), 0.0)
     effective_rationality = rationality * (1.0 + context)
 
     return {
-        "love_support":  0.12 * effective_rationality - emotional_gap * 0.10,
-        "pressure":     -0.15 * rationality,               # always reduces pressure
-        "stability":     0.15 * effective_rationality,
-        "happiness":     0.08 * effective_rationality - emotional_gap * 0.05,
+        "love_support":  0.12 * effective_rationality + rational_amp * 0.08 - emotional_gap * 0.12,
+        "pressure":     -0.15 * rationality - rational_amp * 0.08,
+        "stability":     0.15 * effective_rationality + rational_amp * 0.12,
+        "happiness":     0.08 * effective_rationality + rational_amp * 0.06 - emotional_gap * 0.06,
     }
 
 
 def _withdraw_delta(x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
     """
-    Withdraw always reduces pressure — that's why people do it.
     Emotional shutdown (low ability_to_love + eq) = damage to love_support.
-    Healthy space-taking (high mental_stability + eq) = minimal damage.
-    Partner with high attachment feels the abandonment more acutely.
+    Healthy space-taking = minimal damage.
+
+    Sensitivity amplifier: receiver's low rational_thinking (< 0.5) means they feel
+    abandoned more intensely — bigger love, stability, and happiness loss.
     """
     emotional_presence = (x_self.effective("ability_to_love") + x_self.effective("eq")) / 2.0
-    shutdown = 1.0 - emotional_presence
-    partner_attachment = (x_other.effective("ability_to_love") + x_other.effective("eq")) / 2.0
+    shutdown    = 1.0 - emotional_presence
+    sensitivity = max(0.0, 0.5 - x_other.effective("rational_thinking")) * 2.0
 
     context = _CONTEXT.get((ACTION_WITHDRAW, partner_action), 0.0)
     net_shutdown = shutdown * (1.0 + context)
 
     return {
-        "love_support": -0.15 * net_shutdown - partner_attachment * 0.05,
-        "pressure":     -0.10,                  # always lowers pressure (intentional)
-        "stability":    -0.12 * net_shutdown,
-        "happiness":    -0.05 * net_shutdown,
+        "love_support": -0.15 * net_shutdown - sensitivity * 0.08,
+        "pressure":     -0.10,
+        "stability":    -0.12 * net_shutdown - sensitivity * 0.04,
+        "happiness":    -0.05 * net_shutdown - sensitivity * 0.05,
     }
 
 
@@ -198,6 +207,146 @@ _ACTION_FORMULAS: dict[int, Callable[[XTraits, XTraits, int], dict[str, float]]]
 def _action_delta(action: int, x_self: XTraits, x_other: XTraits, partner_action: int) -> dict[str, float]:
     """Dispatch to the correct action formula."""
     return _ACTION_FORMULAS[action](x_self, x_other, partner_action)
+
+
+# ── Actor self-effects ────────────────────────────────────────────────────────
+#
+# What the ACTOR gains or loses from their own action, applied to their own YState.
+# Separate from the receiver effects computed by the action formulas above.
+#
+# Design: each uses the same max(0, 0.5 - trait) * 2 or (trait - 0.5) * 2 pattern
+# so the personality crossover is always at 0.5 and the range is [0, 1].
+
+_SELF_EFFECTS: dict[int, Callable[[XTraits], dict[str, float]]] = {
+    # Hot-headed actors (mental_stability < 0.5) vent frustration through arguing —
+    # pressure release valve. Stable actors get no self-benefit from arguing.
+    ACTION_ARGUE: lambda x: {
+        "pressure": -(max(0.0, 0.5 - x.effective("mental_stability")) * 2.0) * 0.30,
+        "happiness": (max(0.0, 0.5 - x.effective("mental_stability")) * 2.0) * 0.03,
+    },
+    # Avoidant actors (low eq + ATL, < 0.5 average) feel genuine relief from distance.
+    # Warm actors feel no self-benefit — withdrawal is uncomfortable for them.
+    ACTION_WITHDRAW: lambda x: {
+        "pressure": -(max(0.0, 0.5 - (x.effective("ability_to_love") + x.effective("eq")) / 2.0) * 2.0) * 0.15,
+        "happiness": (max(0.0, 0.5 - (x.effective("ability_to_love") + x.effective("eq")) / 2.0) * 2.0) * 0.04,
+    },
+    # Caring actors (high ATL + kindness) experience giving-joy from nurturing others.
+    ACTION_SUPPORT: lambda x: {
+        "happiness":    x.effective("ability_to_love") * x.effective("kindness") * 0.05,
+        "love_support": x.effective("eq") * x.effective("ability_to_love") * 0.03,
+    },
+    # Rational actors (rational_thinking > 0.5) feel intellectual satisfaction from solving problems.
+    ACTION_COMPROMISE: lambda x: {
+        "pressure":  -(max(0.0, x.effective("rational_thinking") - 0.5) * 2.0) * 0.10,
+        "stability":  (max(0.0, x.effective("rational_thinking") - 0.5) * 2.0) * x.effective("responsibility") * 0.05,
+    },
+    # Strategic ignorers (high mental_stability) feel calm; chronic neglectors feel guilt.
+    # Linear around 0.5: positive self-effect for stable, negative for unstable.
+    ACTION_IGNORE: lambda x: {
+        "pressure": -(x.effective("mental_stability") - 0.5) * 0.08,
+        "happiness": (x.effective("mental_stability") - 0.5) * 0.04,
+    },
+}
+
+
+# ── Personality-modulated event base effects ──────────────────────────────────
+#
+# Additive deltas applied to BOTH partners' Y states when a specific event fires,
+# on top of the event's fixed base_delta_y from events.yaml.
+# These encode how the same event hits differently depending on personality:
+# an infidelity devastates an emotionally open couple but hits a rational couple
+# mainly as a stability shock; a promotion excites ambitious couples more.
+#
+# Magnitudes are intentionally small (≤ 0.10) — amplifiers, not replacements.
+# Applied after action effects so the event's base shock is already in delta.
+
+_EVENT_BASE_MODIFIERS: dict[str, Callable[[XTraits, XTraits], dict[str, float]]] = {
+    # Volatile couples feel emotional conflict more intensely
+    "emotional_conflict": lambda h, w: {
+        "pressure":     0.06 * max(0.0, 1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0),
+        "love_support": -0.04 * max(0.0, 1.0 - (h.effective("eq") + w.effective("eq")) / 2.0),
+    },
+    # Romantic gestures land much harder for emotionally open couples
+    "romantic_gesture": lambda h, w: {
+        "happiness":    0.10 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0,
+        "love_support": 0.08 * (h.effective("eq") + w.effective("eq")) / 2.0,
+    },
+    # Responsible + rational couples navigate financial friction better
+    "financial_disagreement": lambda h, w: {
+        "stability": 0.06 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0,
+        "pressure":  -0.05 * (h.effective("rational_thinking") + w.effective("rational_thinking")) / 2.0,
+    },
+    # Resilient couples absorb health crises with less panic
+    "health_crisis": lambda h, w: {
+        "pressure":  -0.07 * (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0,
+        "stability":  0.05 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0 - 0.025,
+    },
+    # Emotional couples feel betrayal as love devastation; rational couples as stability shock
+    "infidelity": lambda h, w: {
+        "love_support": -0.10 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0,
+        "stability":    -0.08 * (h.effective("rational_thinking") + w.effective("rational_thinking")) / 2.0,
+    },
+    # High-achieving couples get a bigger lift from shared wins
+    "shared_achievement": lambda h, w: {
+        "happiness": 0.08 * (h.effective("iq") + w.effective("iq")) / 2.0,
+        "stability": 0.06 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0,
+    },
+    # Unstable couples spiral harder during mental health episodes
+    "mental_health_episode": lambda h, w: {
+        "happiness": -0.07 * max(0.0, 1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0),
+        "pressure":   0.09 * max(0.0, 1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0),
+    },
+    # Grief hits emotional couples harder but can pull them closer
+    "family_death": lambda h, w: {
+        "happiness":     -0.06 * (h.effective("eq") + w.effective("eq")) / 2.0,
+        "love_support":   0.05 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0,
+    },
+    # Irresponsible couples are hit harder by job loss; stable ones recover faster
+    "job_loss": lambda h, w: {
+        "pressure":  0.07 * max(0.0, 1.0 - (h.effective("responsibility") + w.effective("responsibility")) / 2.0),
+        "stability": -0.05 * max(0.0, 1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0),
+    },
+    # Ambitious couples get a bigger happiness lift from career advancement
+    "promotion": lambda h, w: {
+        "happiness": 0.07 * (h.effective("iq") + w.effective("iq")) / 2.0,
+        "stability": 0.04 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0,
+    },
+    # Responsible couples capitalise on windfalls; irresponsible ones gain little lasting benefit
+    "financial_windfall": lambda h, w: {
+        "happiness": 0.07 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0,
+        "stability": 0.05 * (h.effective("rational_thinking") + w.effective("rational_thinking")) / 2.0,
+    },
+    # Low-patience, low-stability couples spiral in parenting conflicts
+    "parenting_conflict": lambda h, w: {
+        "pressure":  0.06 * max(0.0, 1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0),
+        "stability": -0.05 * max(0.0, 1.0 - (h.effective("responsibility") + w.effective("responsibility")) / 2.0),
+    },
+    # Resilient, adaptable couples find relocation less disruptive
+    "relocation": lambda h, w: {
+        "pressure":  -0.05 * (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0,
+        "happiness":  0.04 * (h.effective("iq") + w.effective("iq")) / 2.0 - 0.02,
+    },
+    # Financial crises devastate irresponsible, irrational couples most
+    "financial_crisis": lambda h, w: {
+        "pressure":  0.09 * max(0.0, 1.0 - (h.effective("responsibility") + w.effective("responsibility")) / 2.0),
+        "stability": -0.07 * max(0.0, 1.0 - (h.effective("rational_thinking") + w.effective("rational_thinking")) / 2.0),
+    },
+    # Caring couples bond more deeply over a new child
+    "new_child": lambda h, w: {
+        "love_support": 0.07 * (h.effective("kindness") + w.effective("kindness")) / 2.0,
+        "happiness":    0.05 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0,
+    },
+    # Quality time replenishes emotionally connected couples most
+    "quality_time": lambda h, w: {
+        "love_support": 0.07 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0,
+        "happiness":    0.05 * (h.effective("eq") + w.effective("eq")) / 2.0,
+    },
+    # Everyday kindness resonates most with kind, empathetic couples
+    "everyday_kindness": lambda h, w: {
+        "happiness":    0.05 * (h.effective("kindness") + w.effective("kindness")) / 2.0,
+        "love_support": 0.04 * (h.effective("eq") + w.effective("eq")) / 2.0,
+    },
+}
 
 
 # ── Pair-level emergent effects ───────────────────────────────────────────────
@@ -513,6 +662,12 @@ class EventCatalog:
         for key, val in _action_delta(action_h, x_h, x_w, action_w).items():
             delta_w[key] = delta_w.get(key, 0.0) + val
 
+        # 2.5. Actor self-effects: personality-driven gains/costs of your own action
+        for key, val in _SELF_EFFECTS[action_h](x_h).items():
+            delta_h[key] = delta_h.get(key, 0.0) + val
+        for key, val in _SELF_EFFECTS[action_w](x_w).items():
+            delta_w[key] = delta_w.get(key, 0.0) + val
+
         # 3. Emergent pair dynamics — felt by both
         for key, val in _PAIR_EXTRAS.get((action_h, action_w), {}).items():
             delta_h[key] = delta_h.get(key, 0.0) + val
@@ -523,5 +678,13 @@ class EventCatalog:
         delta_h["resentment"] = _RESENTMENT_DELTA[action_w]
         delta_w["trust"]      = _TRUST_DELTA[action_h]
         delta_w["resentment"] = _RESENTMENT_DELTA[action_h]
+
+        # 5. Personality-modulated event base effects — same event hits differently per couple
+        if event is not None:
+            name = event["name"]
+            if name in _EVENT_BASE_MODIFIERS:
+                for key, val in _EVENT_BASE_MODIFIERS[name](x_h, x_w).items():
+                    delta_h[key] = delta_h.get(key, 0.0) + val
+                    delta_w[key] = delta_w.get(key, 0.0) + val
 
         return delta_h, delta_w
