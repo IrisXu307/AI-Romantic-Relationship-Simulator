@@ -29,7 +29,31 @@ import yaml
 
 from src.agents.agent import Agent
 from src.env.marriage_env import MarriageEnv
-from src.env.state import _TRAIT_NAMES
+from src.env.state import _TRAIT_NAMES, X_DIM
+
+# ── Personality archetypes for interpretability eval ─────────────────────────
+#
+# Fixed trait profiles used during eval to show that different personalities
+# lead to different action distributions — even with the same trained policy.
+# Each run injects these traits into both agents and records what they choose.
+
+ARCHETYPES: dict[str, dict[str, float]] = {
+    "emotional":  dict(eq=0.9, emotional_reasoning=0.9, ability_to_love=0.9,
+                       iq=0.4,  rational_thinking=0.1, kindness=0.8,
+                       faithfulness=0.7, responsibility=0.5, mental_stability=0.5),
+    "rational":   dict(iq=0.9, rational_thinking=0.9, eq=0.4,
+                       emotional_reasoning=0.1, ability_to_love=0.4,
+                       kindness=0.5, faithfulness=0.7, responsibility=0.8,
+                       mental_stability=0.7),
+    "avoidant":   dict(mental_stability=0.2, eq=0.2, ability_to_love=0.2,
+                       emotional_reasoning=0.2, kindness=0.3,
+                       iq=0.5, rational_thinking=0.5, faithfulness=0.4,
+                       responsibility=0.3),
+    "secure":     dict(mental_stability=0.9, faithfulness=0.9, kindness=0.9,
+                       eq=0.85, ability_to_love=0.85, emotional_reasoning=0.75,
+                       iq=0.65, rational_thinking=0.65, responsibility=0.85),
+}
+
 
 EVAL_CATEGORIES = {
     "Financial":    ["job_loss", "promotion", "financial_crisis", "financial_windfall", "financial_disagreement"],
@@ -38,6 +62,98 @@ EVAL_CATEGORIES = {
     "Relationship": ["infidelity", "emotional_conflict", "romantic_gesture"],
     "Life Change":  ["relocation", "shared_achievement"],
 }
+
+
+# ── Archetype evaluation ─────────────────────────────────────────────────────
+
+def log_archetypes(
+    env: MarriageEnv, agent_h: Agent, agent_w: Agent, episode: int, n_runs: int = 30
+) -> dict[str, list[float]]:
+    """
+    For each personality archetype, run n_runs full episodes with that archetype's
+    traits injected into both agents, print the action distribution, save a bar
+    chart snapshot, and return the distributions for long-run plotting.
+
+    Returns: {arch_name: [frac_support, frac_argue, frac_ignore, frac_compromise, frac_withdraw]}
+    """
+    from collections import Counter
+    from src.env.events import ACTION_NAMES as ANAMES
+
+    header = f"    {'archetype':<12}" + "".join(f"  {a:<11}" for a in ANAMES)
+    print(f"\n  [personality archetypes ep={episode}]")
+    print(header)
+    print("    " + "─" * (12 + 13 * len(ANAMES)))
+
+    distributions: dict[str, list[float]] = {}
+
+    for arch_name, traits in ARCHETYPES.items():
+        counts: Counter = Counter()
+        innate = np.array([traits.get(t, 0.5) for t in _TRAIT_NAMES], dtype=np.float32)
+
+        for _ in range(n_runs):
+            env.reset()
+            for attr, val in traits.items():
+                setattr(env.x_h, attr, float(val))
+                setattr(env.x_w, attr, float(val))
+            env.x_h.innate = innate.copy()
+            env.x_w.innate = innate.copy()
+            obs_h = env._get_obs("h")
+            obs_w = env._get_obs("w")
+
+            done = False
+            while not done:
+                action_h, _, _ = agent_h.act(obs_h)
+                action_w, _, _ = agent_w.act(obs_w)
+                obs_h, _, done, _, info = env.step([action_h, action_w])
+                obs_w = info["obs_w"]
+                counts[action_h] += 1
+
+        total = sum(counts.values())
+        fracs = [counts[i] / total for i in range(len(ANAMES))]
+        distributions[arch_name] = fracs
+        dist_str = "".join(f"  {f:>10.1%}" for f in fracs)
+        print(f"    {arch_name:<12}{dist_str}")
+
+    print()
+    _plot_archetype_snapshot(distributions, episode)
+    return distributions
+
+
+def _plot_archetype_snapshot(distributions: dict[str, list[float]], episode: int):
+    """Save a grouped bar chart of action distributions per archetype."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    from src.env.events import ACTION_NAMES as ANAMES
+
+    archs  = list(distributions.keys())
+    n_arch = len(archs)
+    n_act  = len(ANAMES)
+    x      = np.arange(n_arch)
+    width  = 0.15
+    colors = ["#4C9BE8", "#E8694C", "#8DC87A", "#F5C842", "#B07FD4"]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for i, (action, color) in enumerate(zip(ANAMES, colors)):
+        vals = [distributions[a][i] for a in archs]
+        ax.bar(x + i * width, vals, width, label=action, color=color)
+
+    ax.set_xticks(x + width * (n_act - 1) / 2)
+    ax.set_xticklabels(archs, fontsize=11)
+    ax.set_ylabel("Action frequency")
+    ax.set_ylim(0, 1)
+    ax.set_title(f"Action distribution by personality archetype  (ep {episode})")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+
+    plt.tight_layout()
+    out = f"data/archetypes_ep{episode:07d}.png"
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out, dpi=120)
+    plt.close(fig)
+    print(f"  Archetype chart → {out}")
 
 
 # ── Category evaluation ───────────────────────────────────────────────────────
@@ -138,8 +254,8 @@ def run_episode(
             agent_w.store(obs_w, action_w, log_prob_w, reward_w, value_w)
 
         if info["reflection_triggered"]:
-            reflect(env.x_h, info["delta_y"], x_change_magnitude)
-            reflect(env.x_w, info["delta_y"], x_change_magnitude)
+            reflect(env.x_h, info["delta_h"], x_change_magnitude)
+            reflect(env.x_w, info["delta_w"], x_change_magnitude)
             reflections += 1
 
         ep_reward_h += reward_h
@@ -239,8 +355,8 @@ def main():
     entropy_coef = cfg["ppo"]["entropy_coef"]
 
     # Agents
-    agent_h = Agent(obs_dim, n_actions, hidden_dim, lr, device, clip_eps, ppo_epochs, gae_lambda)
-    agent_w = Agent(obs_dim, n_actions, hidden_dim, lr, device, clip_eps, ppo_epochs, gae_lambda)
+    agent_h = Agent(obs_dim, n_actions, hidden_dim, lr, device, clip_eps, ppo_epochs, gae_lambda, x_dim=X_DIM)
+    agent_w = Agent(obs_dim, n_actions, hidden_dim, lr, device, clip_eps, ppo_epochs, gae_lambda, x_dim=X_DIM)
 
     start_ep   = 0
     all_metrics: list[dict] = []
@@ -299,6 +415,8 @@ def main():
             eval_history.append(cat_scores)
             scores_str = "  ".join(f"{k}={v:.3f}" for k, v in cat_scores.items() if k != "episode")
             print(f"  [eval ep={ep+1}] {scores_str}")
+            arch_dists = log_archetypes(env, agent_h, agent_w, ep + 1)
+            cat_scores["archetypes"] = arch_dists
 
     elapsed = time.time() - t0
     print(f"\nDone — {elapsed:.1f}s total  ({elapsed / n_episodes * 1000:.1f} ms/ep)")
@@ -318,15 +436,17 @@ def main():
 
     # Optional training curves
     if args.plot:
-        _plot(all_metrics)
+        _plot(all_metrics, eval_history)
 
 
-def _plot(metrics: list[dict]):
+def _plot(metrics: list[dict], eval_history: list[dict] | None = None):
     try:
         import matplotlib.pyplot as plt
     except ImportError:
         print("matplotlib not installed; skipping plot")
         return
+
+    from src.env.events import ACTION_NAMES as ANAMES
 
     def smooth(vals, w=100):
         if len(vals) < w:
@@ -334,6 +454,7 @@ def _plot(metrics: list[dict]):
         kernel = np.ones(w) / w
         return np.convolve(vals, kernel, mode="valid").tolist()
 
+    # ── Training curves (2×2) ─────────────────────────────────────────────────
     fig, axes = plt.subplots(2, 2, figsize=(13, 8))
     fig.suptitle("Marriage RL — Training Curves", fontsize=14)
 
@@ -360,6 +481,39 @@ def _plot(metrics: list[dict]):
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out, dpi=120)
     print(f"Plot saved → {out}")
+    plt.show()
+
+    # ── Archetype evolution over training ─────────────────────────────────────
+    # One subplot per archetype: lines show how each action's frequency evolves.
+    if not eval_history:
+        return
+    arch_records = [e for e in eval_history if "archetypes" in e]
+    if not arch_records:
+        return
+
+    episodes   = [e["episode"] for e in arch_records]
+    arch_names = list(ARCHETYPES.keys())
+    colors     = ["#4C9BE8", "#E8694C", "#8DC87A", "#F5C842", "#B07FD4"]
+
+    fig2, axes2 = plt.subplots(1, len(arch_names), figsize=(5 * len(arch_names), 4), sharey=True)
+    fig2.suptitle("How each personality's action preferences evolve over training", fontsize=13)
+
+    for ax, arch in zip(axes2, arch_names):
+        for i, (action, color) in enumerate(zip(ANAMES, colors)):
+            vals = [e["archetypes"][arch][i] for e in arch_records]
+            ax.plot(episodes, vals, label=action, color=color, linewidth=1.8)
+        ax.set_title(arch, fontsize=11)
+        ax.set_xlabel("Episode")
+        ax.set_ylim(0, 1)
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+        if ax is axes2[0]:
+            ax.set_ylabel("Action frequency")
+            ax.legend(fontsize=8, loc="upper left")
+
+    plt.tight_layout()
+    out2 = "data/archetype_evolution.png"
+    plt.savefig(out2, dpi=120)
+    print(f"Plot saved → {out2}")
     plt.show()
 
 

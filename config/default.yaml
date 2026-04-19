@@ -4,8 +4,8 @@ simulation:
 
 agents:
   # X traits are sampled uniformly from [x_init_low, x_init_high] at episode start
-  x_init_low: 0.2
-  x_init_high: 0.8
+  x_init_low: 0.05
+  x_init_high: 0.95
   # Base std for perceptual noise added to observations.
   # Actual noise std = obs_noise_scale * (1 - effective_eq).
   # Agents with higher EQ perceive themselves and their partner more accurately.
@@ -34,7 +34,7 @@ training:
   learning_rate: 0.001
   gamma: 0.99        # discount factor for future rewards
   episodes: 1000000
-  hidden_dim: 64
+  hidden_dim: 128
   seed: 42
 
 ppo:

@@ -25,14 +25,15 @@ class Agent:
         clip_eps: float = 0.2,
         ppo_epochs: int = 4,
         gae_lambda: float = 0.95,
+        x_dim: int = 10,
     ):
         self.device = device
         self.clip_eps = clip_eps
         self.ppo_epochs = ppo_epochs
         self.gae_lambda = gae_lambda
 
-        self.policy = PolicyNet(obs_dim, n_actions, hidden_dim).to(device)
-        self.value  = ValueNet(obs_dim, hidden_dim).to(device)
+        self.policy = PolicyNet(obs_dim, n_actions, hidden_dim, x_dim=x_dim).to(device)
+        self.value  = ValueNet(obs_dim, hidden_dim, x_dim=x_dim).to(device)
         self.optimizer = torch.optim.Adam(
             list(self.policy.parameters()) + list(self.value.parameters()),
             lr=lr,

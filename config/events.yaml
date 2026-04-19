@@ -57,7 +57,7 @@ events:
 
   - name: infidelity
     description: "One partner's unfaithfulness is discovered."
-    probability: 0.02
+    probability: 0.005
     base_delta_y:
       love_support: -0.50
       stability: -0.40
@@ -65,7 +65,7 @@ events:
 
   - name: emotional_conflict
     description: "A prolonged argument or period of emotional tension."
-    probability: 0.08
+    probability: 0.04
     base_delta_y:
       love_support: -0.20
       stability: -0.15
@@ -113,7 +113,7 @@ events:
 
   - name: parenting_conflict
     description: "Disagreement about how to raise the children."
-    probability: 0.04
+    probability: 0.02
     base_delta_y:
       love_support: -0.15
       stability: -0.10
@@ -121,8 +121,23 @@ events:
 
   - name: financial_disagreement
     description: "Conflict over spending, saving, or financial priorities."
-    probability: 0.06
+    probability: 0.03
     base_delta_y:
       love_support: -0.10
       stability: -0.10
       pressure: 0.15
+
+  - name: quality_time
+    description: "A period of genuine connection — date night, shared hobby, good conversation."
+    probability: 0.12
+    base_delta_y:
+      love_support: 0.06
+      happiness: 0.04
+
+  - name: everyday_kindness
+    description: "Small acts of care and appreciation that accumulate over time."
+    probability: 0.10
+    base_delta_y:
+      love_support: 0.04
+      stability: 0.02
+      pressure: -0.03

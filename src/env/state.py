@@ -4,14 +4,14 @@ import numpy as np
 
 # Dimensionality constants used throughout the codebase
 X_DIM = 10
-Y_DIM = 5
+Y_DIM = 7  # wealth, love_support, pressure, happiness, stability, trust, resentment
 
 # Weighting between fixed innate baseline and mutable learned component.
 # Effective trait = INNATE_W * innate + LEARNED_W * learned
 # The innate floor anchors each agent's identity so traits can never fully
 # converge to perfect — growth is real but bounded by who you started as.
-INNATE_W: float = 0.7
-LEARNED_W: float = 0.3
+INNATE_W: float = 0.5
+LEARNED_W: float = 0.5
 
 # Ordered names of the 9 mutable traits (excludes kids).
 # Used by to_array(), clip(), and effective() to stay in sync.
@@ -105,20 +105,29 @@ class XTraits:
 @dataclass
 class YState:
     """
-    Shared environmental state for the couple.
-    All values are in [0, 1].
-    happiness and stability are the primary reward signals.
+    One partner's subjective relationship state. All values in [0, 1].
+
+    Each partner holds their own YState — two people in the same marriage
+    can experience it differently. trust and resentment are accumulated
+    history signals: they change slowly each step based on the *partner's*
+    action, giving the policy a memory of past behaviour without violating
+    the Markov property of the observation.
+
+    Field order (matches to_array):
+        wealth, love_support, pressure, happiness, stability, trust, resentment
     """
-    wealth: float = 0.5
+    wealth:       float = 0.5
     love_support: float = 0.7
-    pressure: float = 0.3
-    happiness: float = 0.7
-    stability: float = 0.8
+    pressure:     float = 0.3
+    happiness:    float = 0.7
+    stability:    float = 0.8
+    trust:        float = 0.5   # this partner's trust IN their partner
+    resentment:   float = 0.1   # this partner's resentment TOWARD their partner
 
     def to_array(self) -> np.ndarray:
         return np.array([
             self.wealth, self.love_support, self.pressure,
-            self.happiness, self.stability,
+            self.happiness, self.stability, self.trust, self.resentment,
         ], dtype=np.float32)
 
     def apply_delta(self, delta: dict):
@@ -135,4 +144,6 @@ class YState:
             pressure=self.pressure,
             happiness=self.happiness,
             stability=self.stability,
+            trust=self.trust,
+            resentment=self.resentment,
         )

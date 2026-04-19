@@ -206,6 +206,33 @@ def _action_delta(action: int, x_self: XTraits, x_other: XTraits, partner_action
 # either agent's individual formula already captures.
 # Only non-trivial pairs are listed; all others have no extra effect.
 
+# ── Trust & resentment accumulation rates ────────────────────────────────────
+#
+# These small per-step deltas are applied to the *receiving* partner's YState
+# based on what their partner just did.  They accumulate slowly into a history
+# signal without breaking the Markov property of the observation.
+#
+# Design: magnitudes are intentionally small (≤ 0.04) so they take many
+# consistent steps to saturate — a single bad action doesn't destroy trust,
+# but a chronic pattern does.
+
+_TRUST_DELTA: dict[int, float] = {
+    ACTION_SUPPORT:    +0.020,
+    ACTION_ARGUE:      -0.040,
+    ACTION_IGNORE:     -0.030,
+    ACTION_COMPROMISE: +0.015,
+    ACTION_WITHDRAW:   -0.015,
+}
+
+_RESENTMENT_DELTA: dict[int, float] = {
+    ACTION_SUPPORT:    -0.015,
+    ACTION_ARGUE:      +0.040,
+    ACTION_IGNORE:     +0.030,
+    ACTION_COMPROMISE: -0.010,
+    ACTION_WITHDRAW:   +0.020,
+}
+
+
 _PAIR_EXTRAS: dict[tuple[int, int], dict[str, float]] = {
     # Mutual warmth: emotional climate synergy
     (ACTION_SUPPORT, ACTION_SUPPORT):       {"love_support":  0.05, "happiness":  0.04},
@@ -241,16 +268,21 @@ _TRAIT_PROB_MODIFIERS: dict[str, Callable[[XTraits, XTraits], float]] = {
     "infidelity": lambda h, w: (
         1.0 - 0.6 * (h.effective("faithfulness") + w.effective("faithfulness")) / 2.0
     ),
-    # Low mental stability → more emotional conflict
+    # Emotional conflict: low stability AND high emotional reactivity raise risk;
+    # high EQ offsets it — emotionally intelligent people de-escalate before blowups.
+    # Coefficients ≤ 0.4 so no single trait dominates (anti-overfit).
     "emotional_conflict": lambda h, w: (
-        1.0 + 0.5 * (1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0)
+        1.0
+        + 0.4 * (1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0)
+        + 0.2 * (h.effective("emotional_reasoning") + w.effective("emotional_reasoning")) / 2.0
+        - 0.2 * (h.effective("eq") + w.effective("eq")) / 2.0
     ),
     # Low responsibility → more financial friction
     "financial_disagreement": lambda h, w: (
         1.0 + 0.4 * (1.0 - (h.effective("responsibility") + w.effective("responsibility")) / 2.0)
     ),
     # Having kids amplifies parenting conflict chance
-    "parenting_conflict": lambda h, w: (
+    "parenting_conflict": lambda h, _: (
         1.0 + 0.5 * h.kids  # kids is shared, so x_h.kids == x_w.kids
     ),
     # Low responsibility → more job instability
@@ -260,6 +292,29 @@ _TRAIT_PROB_MODIFIERS: dict[str, Callable[[XTraits, XTraits], float]] = {
     # Low mental stability → more mental health episodes
     "mental_health_episode": lambda h, w: (
         1.0 + 0.4 * (1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0)
+    ),
+    # High ability_to_love + EQ → emotional couples express love more readily.
+    # Both traits needed: wanting to love AND knowing how to express it.
+    "romantic_gesture": lambda h, w: (
+        1.0
+        + 0.3 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0
+        + 0.2 * (h.effective("eq") + w.effective("eq")) / 2.0
+    ),
+    # High EQ + ability_to_love → couples actively seek connection time together.
+    "quality_time": lambda h, w: (
+        1.0
+        + 0.3 * (h.effective("eq") + w.effective("eq")) / 2.0
+        + 0.2 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0
+    ),
+    # Kindness is the most direct predictor of everyday positive micro-interactions.
+    "everyday_kindness": lambda h, w: (
+        1.0 + 0.4 * (h.effective("kindness") + w.effective("kindness")) / 2.0
+    ),
+    # High responsibility + IQ → couples who set and reach shared goals.
+    "shared_achievement": lambda h, w: (
+        1.0
+        + 0.2 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0
+        + 0.15 * (h.effective("iq") + w.effective("iq")) / 2.0
     ),
 }
 
@@ -342,34 +397,47 @@ class EventCatalog:
         action_w: int,
         x_h: XTraits,
         x_w: XTraits,
-    ) -> dict[str, float]:
+    ) -> tuple[dict[str, float], dict[str, float]]:
         """
-        Compute total ΔY for one timestep.
+        Compute per-partner ΔY for one timestep.
 
-        1. Base event delta (from YAML)
-        2. Each agent's action formula, at half weight so both together don't double-count.
-           Formula takes (x_self, x_other, partner_action) — same action produces
-           different deltas depending on who is doing it and who is receiving it.
-        3. Pair-level emergent effects (_PAIR_EXTRAS): dynamics that arise from
-           the combination and aren't captured by individual formulas.
+        Returns (delta_h, delta_w) — each partner's subjective experience of the step.
+
+        Design:
+          - Base event delta applies equally to both (the event happens to the couple).
+          - H's subjective state is shaped by W's action toward H: W acts, H receives.
+          - W's subjective state is shaped by H's action toward W: H acts, W receives.
+          - Pair-level emergent effects are felt equally by both.
+          - Trust/resentment accumulate slowly based on the partner's action,
+            encoding relationship history into the observation without breaking Markov.
         """
-        delta: dict[str, float] = {}
-
-        # 1. Base event effect
+        # 1. Base event effect — same for both partners
+        base: dict[str, float] = {}
         if event is not None:
             for key, val in event["base_delta_y"].items():
-                delta[key] = delta.get(key, 0.0) + val
+                base[key] = val
 
-        # 2. Per-agent action deltas, each at half weight
-        for d in [
-            _action_delta(action_h, x_h, x_w, action_w),
-            _action_delta(action_w, x_w, x_h, action_h),
-        ]:
-            for key, val in d.items():
-                delta[key] = delta.get(key, 0.0) + val * 0.5
+        delta_h: dict[str, float] = dict(base)
+        delta_w: dict[str, float] = dict(base)
 
-        # 3. Emergent pair dynamics
+        # 2. Action effects: each partner experiences what their partner does to them
+        #    W's action → how H's subjective state changes (H is the receiver)
+        for key, val in _action_delta(action_w, x_w, x_h, action_h).items():
+            delta_h[key] = delta_h.get(key, 0.0) + val
+
+        #    H's action → how W's subjective state changes (W is the receiver)
+        for key, val in _action_delta(action_h, x_h, x_w, action_w).items():
+            delta_w[key] = delta_w.get(key, 0.0) + val
+
+        # 3. Emergent pair dynamics — felt by both
         for key, val in _PAIR_EXTRAS.get((action_h, action_w), {}).items():
-            delta[key] = delta.get(key, 0.0) + val
+            delta_h[key] = delta_h.get(key, 0.0) + val
+            delta_w[key] = delta_w.get(key, 0.0) + val
 
-        return delta
+        # 4. Trust & resentment: H's accumulate based on W's action, and vice versa
+        delta_h["trust"]      = _TRUST_DELTA[action_w]
+        delta_h["resentment"] = _RESENTMENT_DELTA[action_w]
+        delta_w["trust"]      = _TRUST_DELTA[action_h]
+        delta_w["resentment"] = _RESENTMENT_DELTA[action_h]
+
+        return delta_h, delta_w
