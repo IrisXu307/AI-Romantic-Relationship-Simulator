@@ -7,6 +7,17 @@ from typing import Optional
 from src.env.state import XTraits, YState, X_DIM, Y_DIM
 from src.env.events import EventCatalog, N_ACTIONS
 
+# How much social_support shifts after specific life events.
+# Negative = isolation (relocation breaks community ties, grief shrinks social world).
+# Positive = expansion (shared success and intimacy tend to open social circles).
+_SOCIAL_SUPPORT_SHIFTS: dict[str, float] = {
+    "relocation":         -0.10,
+    "family_death":       -0.08,
+    "new_child":          -0.05,
+    "shared_achievement": +0.05,
+    "romantic_gesture":   +0.02,
+}
+
 # Consecutive steps both partners must be in relationship distress before
 # the episode terminates as a divorce.
 _DIVORCE_STREAK = 3
@@ -57,6 +68,11 @@ class MarriageEnv(gym.Env):
         self._partner_obs_noise_scale: float = cfg["agents"]["partner_obs_noise_scale"]
         self._reflection_threshold: float = cfg["reflection"]["threshold"]
 
+        ss = cfg["social_support"]
+        self._social_init_low:       float = ss["init_low"]
+        self._social_init_high:      float = ss["init_high"]
+        self._isolation_amplifier:   float = ss["isolation_amplifier"]
+
         # Base reward weights — scaled by age inside _compute_rewards()
         rwd = cfg["reward"]
         self._happiness_w_h: float = rwd["agent_h"]["happiness_weight"]
@@ -68,8 +84,8 @@ class MarriageEnv(gym.Env):
 
         self.events = EventCatalog(events_path)
 
-        # +1 for life_stage_frac appended to every observation
-        obs_dim = X_DIM + X_DIM + Y_DIM + (self.events.n_events + 1) + 1
+        # +1 for social_support, +1 for life_stage_frac appended to every observation
+        obs_dim = X_DIM + X_DIM + Y_DIM + (self.events.n_events + 1) + 1 + 1
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -84,6 +100,7 @@ class MarriageEnv(gym.Env):
         self.current_event: Optional[dict] = None
         self._distress_streak: int = 0       # consecutive steps in divorce-risk territory
         self._event_counts: dict[str, int] = {}  # how many times each event has fired this episode
+        self.social_support: float = 0.6    # couple's external support network strength
 
     # ── Core Gymnasium interface ───────────────────────────────────────────────
 
@@ -99,6 +116,7 @@ class MarriageEnv(gym.Env):
         self.age = self.age_start
         self._distress_streak = 0
         self._event_counts = {}
+        self.social_support = float(np.random.uniform(self._social_init_low, self._social_init_high))
         self.current_event = self.events.sample(self.x_h, self.x_w, age=self.age)
 
         obs_h = self._get_obs("h")
@@ -122,10 +140,29 @@ class MarriageEnv(gym.Env):
             habituation = max(rate ** count, floor)
             self._event_counts[name] = count + 1
 
-        # Compute per-partner ΔY (event + actions + trust/resentment)
+        # Social isolation amplifier: couples with weak external support networks
+        # experience negative events more acutely — no one to lean on outside the marriage.
+        # At social_support=1.0: no amplification. At 0.0: base impact × (1 + isolation_amplifier).
+        social_scale = 1.0
+        if self.current_event:
+            base_sum = sum(self.current_event["base_delta_y"].values())
+            if base_sum < 0:
+                social_scale = 1.0 + self._isolation_amplifier * (1.0 - self.social_support)
+
+        # Update social_support: slow mean-reversion toward 0.6, plus event-specific shifts.
+        # Applied before delta computation so this step's social_support state is observed.
+        event_name_now = self.current_event["name"] if self.current_event else "none"
+        social_shift = _SOCIAL_SUPPORT_SHIFTS.get(event_name_now, 0.0)
+        self.social_support = float(np.clip(
+            self.social_support + 0.005 * (0.6 - self.social_support) + social_shift,
+            0.0, 1.0,
+        ))
+
+        # Compute per-partner ΔY (event + actions + trust/resentment).
+        # base_scale = habituation × social_scale: both operate on the base event component.
         delta_h, delta_w = self.events.compute_delta_y(
             self.current_event, action_h, action_w, self.x_h, self.x_w,
-            habituation=habituation,
+            habituation=habituation * social_scale,
         )
         self.y_h.apply_delta(delta_h)
         self.y_w.apply_delta(delta_w)
@@ -175,6 +212,7 @@ class MarriageEnv(gym.Env):
         info = {
             "age":                  self.age,
             "life_stage":           float(life_stage_frac),
+            "social_support":       self.social_support,
             "event":                self.current_event["name"] if self.current_event else "none",
             "delta_h":              delta_h,
             "delta_w":              delta_w,
@@ -242,6 +280,7 @@ class MarriageEnv(gym.Env):
             x_other_arr,
             y_own.to_array(),
             self.events.one_hot(self.current_event),
+            [np.float32(self.social_support)],
             [life_stage_frac],
         ]).astype(np.float32)
 

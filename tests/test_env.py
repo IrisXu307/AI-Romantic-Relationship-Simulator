@@ -398,3 +398,91 @@ def test_stage_prob_health_crisis_rises_with_age(env):
     x = XTraits()
     idx = env.events.names.index("health_crisis")
     assert env.events._adjusted_probs(x, x, age=70)[idx] > env.events._adjusted_probs(x, x, age=30)[idx]
+
+
+# ── Phase 3b: social support context ─────────────────────────────────────────
+
+def test_social_support_sampled_at_reset(env):
+    """social_support should be in [init_low, init_high] after reset."""
+    env.reset(seed=0)
+    assert 0.30 <= env.social_support <= 0.90
+
+def test_social_support_differs_across_resets(env):
+    """Different seeds should produce different social_support values."""
+    env.reset(seed=0)
+    s0 = env.social_support
+    env.reset(seed=99)
+    s1 = env.social_support
+    assert s0 != s1
+
+def test_social_support_in_info(env):
+    env.reset(seed=0)
+    _, _, _, _, info = env.step(env.action_space.sample())
+    assert "social_support" in info
+    assert 0.0 <= info["social_support"] <= 1.0
+
+def test_social_support_in_obs(env):
+    """social_support should be the second-to-last obs element (obs[-2])."""
+    env.reset(seed=0)
+    obs, _ = env.reset(seed=5)
+    # social_support is at obs[-2]; life_stage is at obs[-1]
+    assert 0.0 <= obs[-2] <= 1.0
+
+def test_low_social_support_amplifies_negative_event(env, neutral_x):
+    """Isolated couple should see stronger negative base event impact than connected couple."""
+    env.reset(seed=0)
+    conflict = next(e for e in env.events.events if e["name"] == "emotional_conflict")
+    env.current_event = conflict
+
+    env.social_support = 0.0   # fully isolated
+    _, _, _, _, info_isolated = env.step([3, 3])  # both compromise
+
+    env.reset(seed=0)
+    env.current_event = conflict
+    env.social_support = 1.0   # fully connected
+    _, _, _, _, info_connected = env.step([3, 3])
+
+    # Isolated couple should have lower love_support after the conflict
+    y_isolated  = info_isolated["y_state_h"]
+    y_connected = info_connected["y_state_h"]
+    assert y_isolated[1] <= y_connected[1], "Isolated couple should suffer more from conflict"
+
+def test_social_support_shifts_after_relocation(env):
+    """Relocation event should decrease social_support."""
+    env.reset(seed=0)
+    relocation = next(e for e in env.events.events if e["name"] == "relocation")
+    env.current_event = relocation
+    support_before = env.social_support
+    env.step(env.action_space.sample())
+    assert env.social_support < support_before
+
+def test_social_support_shifts_after_shared_achievement(env):
+    """Shared achievement should increase social_support."""
+    env.reset(seed=0)
+    achievement = next(e for e in env.events.events if e["name"] == "shared_achievement")
+    env.current_event = achievement
+    # Set social_support below equilibrium so it can rise
+    env.social_support = 0.4
+    env.step(env.action_space.sample())
+    # Should be higher than 0.4 + mean-reversion drift of 0.005*(0.6-0.4) = 0.001
+    assert env.social_support > 0.4
+
+
+# ── Phase 2b: event-dependent reflection magnitudes ───────────────────────────
+
+def test_reflection_magnitudes_keys_are_valid_events(env):
+    """Every event in REFLECTION_MAGNITUDES must exist in the event catalog."""
+    from train import REFLECTION_MAGNITUDES
+    for name in REFLECTION_MAGNITUDES:
+        assert name in env.events.names, f"'{name}' not in event catalog"
+
+def test_reflection_magnitudes_all_positive(env):
+    from train import REFLECTION_MAGNITUDES
+    for name, mag in REFLECTION_MAGNITUDES.items():
+        assert mag > 0.0, f"Magnitude for {name} must be positive"
+
+def test_infidelity_magnitude_exceeds_default(env):
+    from train import REFLECTION_MAGNITUDES
+    default = 0.05
+    assert REFLECTION_MAGNITUDES["infidelity"] > default
+    assert REFLECTION_MAGNITUDES["family_death"] > default

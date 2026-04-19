@@ -192,6 +192,19 @@ def evaluate_by_category(env: MarriageEnv, agent_h: Agent, agent_w: Agent, n_eva
 
 # ── Reflection ────────────────────────────────────────────────────────────────
 
+# Major life events warrant larger trait shifts than everyday friction.
+# Values are caps on any single trait change; config x_change_magnitude is the default.
+REFLECTION_MAGNITUDES: dict[str, float] = {
+    "infidelity":            0.20,   # trust shattered — identity-level disruption
+    "family_death":          0.15,   # grief reshapes emotional capacity and stability
+    "health_crisis":         0.12,   # confronting mortality changes priorities
+    "mental_health_episode": 0.12,   # psychological rupture forces self-examination
+    "new_child":             0.10,   # parenthood is a documented personality shift
+    "relocation":            0.08,   # uprooting disrupts identity and social self
+    "financial_crisis":      0.07,   # sustained stress erodes responsibility and stability
+}
+
+
 def reflect(x_traits, delta_y: dict, magnitude: float):
     """
     Nudge an agent's *learned* traits after a significant life event.
@@ -263,8 +276,10 @@ def run_episode(
             agent_w.store(obs_w, action_w, log_prob_w, reward_w, value_w)
 
         if info["reflection_triggered"]:
-            reflect(env.x_h, info["delta_h"], x_change_magnitude)
-            reflect(env.x_w, info["delta_w"], x_change_magnitude)
+            event_name = info.get("event", "none")
+            magnitude = REFLECTION_MAGNITUDES.get(event_name, x_change_magnitude)
+            reflect(env.x_h, info["delta_h"], magnitude)
+            reflect(env.x_w, info["delta_w"], magnitude)
             reflections += 1
 
         ep_reward_h += reward_h

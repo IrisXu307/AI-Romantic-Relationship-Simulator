@@ -17,8 +17,17 @@ agents:
 reflection:
   # |delta_y| on any single Y variable must exceed this to trigger reflection
   threshold: 0.15
-  # max absolute change applied to any X trait during reflection
+  # default max X trait change for minor events; major events override via REFLECTION_MAGNITUDES
   x_change_magnitude: 0.05
+
+social_support:
+  # Couple's external support network strength — sampled uniformly at episode start.
+  # Isolated couples (low social_support) take harder hits from negative events.
+  init_low: 0.30
+  init_high: 0.90
+  # Multiplier on negative base event impact: effective = 1 + amplifier * (1 - social_support)
+  # At social_support=1.0 → no amplification; at 0.0 → 1 + amplifier × impact
+  isolation_amplifier: 0.30
 
 # Per-agent reward weights over Y state variables.
 # Different weights encode different life priorities, creating genuine
