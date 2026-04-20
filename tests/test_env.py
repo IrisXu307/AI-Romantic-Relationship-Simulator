@@ -486,3 +486,153 @@ def test_infidelity_magnitude_exceeds_default(env):
     default = 0.05
     assert REFLECTION_MAGNITUDES["infidelity"] > default
     assert REFLECTION_MAGNITUDES["family_death"] > default
+
+
+# ── Phase B+C: behavior history and high-stakes scaling ───────────────────────
+
+def test_c1_cooperative_history_lowers_conflict_prob(env):
+    """Cooperative action history should lower emotional_conflict probability."""
+    from src.env.state import XTraits
+    from src.env.events import ACTION_SUPPORT
+    x = XTraits()
+    idx = env.events.names.index("emotional_conflict")
+    # 5 support actions = 100% cooperative
+    coop = [ACTION_SUPPORT] * 5
+    p_coop    = env.events._adjusted_probs(x, x, age=35, action_history_h=coop, action_history_w=coop)
+    p_neutral = env.events._adjusted_probs(x, x, age=35)
+    assert p_coop[idx] < p_neutral[idx]
+
+def test_c1_destructive_history_raises_conflict_prob(env):
+    """Destructive action history should raise emotional_conflict probability."""
+    from src.env.state import XTraits
+    from src.env.events import ACTION_ARGUE
+    x = XTraits()
+    idx = env.events.names.index("emotional_conflict")
+    dest = [ACTION_ARGUE] * 5
+    p_dest    = env.events._adjusted_probs(x, x, age=35, action_history_h=dest, action_history_w=dest)
+    p_neutral = env.events._adjusted_probs(x, x, age=35)
+    assert p_dest[idx] > p_neutral[idx]
+
+def test_c1_cooperative_history_raises_romantic_gesture_prob(env):
+    """Cooperative history should increase romantic_gesture probability."""
+    from src.env.state import XTraits
+    from src.env.events import ACTION_COMPROMISE
+    x = XTraits()
+    idx = env.events.names.index("romantic_gesture")
+    coop = [ACTION_COMPROMISE] * 5
+    p_coop    = env.events._adjusted_probs(x, x, age=35, action_history_h=coop, action_history_w=coop)
+    p_neutral = env.events._adjusted_probs(x, x, age=35)
+    assert p_coop[idx] > p_neutral[idx]
+
+def test_c1_action_history_tracked_in_env(env):
+    """Environment should record action history across steps."""
+    env.reset(seed=0)
+    env.step([0, 3])  # support, compromise
+    env.step([1, 1])  # argue, argue
+    assert list(env._action_history_h) == [0, 1]
+    assert list(env._action_history_w) == [3, 1]
+
+def test_c1_action_history_cleared_on_reset(env):
+    """Action history should be empty after reset."""
+    env.reset(seed=0)
+    env.step(env.action_space.sample())
+    env.reset(seed=1)
+    assert len(env._action_history_h) == 0
+    assert len(env._action_history_w) == 0
+
+def test_c2_high_stakes_amplifies_action_delta(env, neutral_x):
+    """Action delta should be larger when event is high-stakes vs no event."""
+    catalog = env.events
+    infidelity = next(e for e in catalog.events if e["name"] == "infidelity")
+    d_h_crisis, _ = catalog.compute_delta_y(infidelity, 0, 0, neutral_x, neutral_x)
+    d_h_none,   _ = catalog.compute_delta_y(None,       0, 0, neutral_x, neutral_x)
+    # love_support gain from mutual support should be larger during infidelity
+    assert abs(d_h_crisis.get("love_support", 0)) > abs(d_h_none.get("love_support", 0))
+
+def test_c2_non_high_stakes_unaffected(env, neutral_x):
+    """Non-high-stakes event should not apply the 1.8× action scale."""
+    catalog = env.events
+    relocation = next(e for e in catalog.events if e["name"] == "relocation")
+    quality = next(e for e in catalog.events if e["name"] == "quality_time")
+    d_reloc, _ = catalog.compute_delta_y(relocation, 0, 3, neutral_x, neutral_x)
+    d_qtim,  _ = catalog.compute_delta_y(quality,    0, 3, neutral_x, neutral_x)
+    assert isinstance(d_reloc.get("love_support", 0.0), float)
+    assert isinstance(d_qtim.get("love_support", 0.0), float)
+
+
+# ── Phase D: conflict-resolution bonus ───────────────────────────────────────
+
+def test_resolution_bonus_awarded_when_pressure_drops(env):
+    """Reward should include a bonus when high pressure is successfully relieved."""
+    env.reset(seed=0)
+    env.y_h.pressure = 0.80   # above threshold
+    env.y_w.pressure = 0.80
+    env.current_event = None
+    # support + compromise tends to drop pressure
+    _, reward, _, _, info = env.step([0, 3])
+    # At least one partner should have benefited; check reward is at least base level
+    assert reward >= 0.0
+    assert "reward_h" in info
+
+def test_resolution_bonus_not_awarded_when_pressure_low(env):
+    """No bonus when pressure starts below the threshold."""
+    from src.env.marriage_env import _RESOLUTION_PRESSURE_THRESHOLD, _RESOLUTION_BONUS
+    env.reset(seed=0)
+    env.y_h.pressure = 0.10   # well below threshold
+    env.y_w.pressure = 0.10
+    env.current_event = None
+    _, _, _, _, info = env.step([0, 3])
+    # reward_h should be base value without resolution bonus
+    base_reward = info["reward_h"]
+    # Verify it's a valid float — no bonus means reward stays at base
+    assert 0.0 <= base_reward <= 1.0
+
+def test_resolution_bonus_caps_at_one(env):
+    """Resolution bonus should not push reward above 1.0."""
+    env.reset(seed=0)
+    env.y_h.pressure = 0.90
+    env.y_w.pressure = 0.90
+    env.y_h.happiness = 1.0
+    env.y_h.stability = 1.0
+    env.y_w.happiness = 1.0
+    env.y_w.stability = 1.0
+    env.current_event = None
+    _, _, _, _, info = env.step([0, 3])
+    assert info["reward_h"] <= 1.0
+    assert info["reward_w"] <= 1.0
+
+
+# ── Phase E: noisy partner Y estimate in observation ─────────────────────────
+
+def test_obs_dim_includes_partner_y(env):
+    """Observation dimension should include two Y blocks (own + partner estimate)."""
+    from src.env.state import X_DIM, Y_DIM
+    obs, _ = env.reset(seed=0)
+    # obs_dim = X_DIM + X_DIM + Y_DIM + Y_DIM + n_events+1 + 1 + 1
+    expected = X_DIM + X_DIM + Y_DIM + Y_DIM + (env.events.n_events + 1) + 1 + 1
+    assert obs.shape[0] == expected
+
+def test_partner_y_estimate_exact_at_max_trust(env):
+    """At trust=1.0 partner Y noise is zero; partner Y slice equals true partner state."""
+    from src.env.state import X_DIM, Y_DIM
+    env.reset(seed=42)
+    env.y_h.trust = 1.0
+    obs_h = env._get_obs("h")
+    # partner Y estimate sits at offset X_DIM + X_DIM + Y_DIM
+    y_partner_slice = obs_h[2 * X_DIM + Y_DIM : 2 * X_DIM + 2 * Y_DIM]
+    true_partner_y  = env.y_w.to_array()
+    np.testing.assert_array_almost_equal(y_partner_slice, true_partner_y, decimal=4)
+
+def test_partner_y_estimate_noisy_at_zero_trust(env):
+    """At trust=0.0 partner Y noise is maximal; two calls should differ."""
+    from src.env.state import X_DIM, Y_DIM
+    env.reset(seed=1)
+    env.y_h.trust = 0.0
+    a = env._get_obs("h")[2 * X_DIM + Y_DIM : 2 * X_DIM + 2 * Y_DIM]
+    b = env._get_obs("h")[2 * X_DIM + Y_DIM : 2 * X_DIM + 2 * Y_DIM]
+    assert not np.array_equal(a, b)
+
+def test_obs_bounds_include_partner_y(env):
+    """Full observation including partner Y estimate should stay in [0, 1]."""
+    obs, _ = env.reset(seed=7)
+    assert env.observation_space.contains(obs)

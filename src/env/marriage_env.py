@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import yaml
+from collections import deque
 from gymnasium import spaces
 from typing import Optional
 
@@ -23,6 +24,13 @@ _SOCIAL_SUPPORT_SHIFTS: dict[str, float] = {
 _DIVORCE_STREAK = 3
 _DIVORCE_LOVE_THRESHOLD = 0.15
 _DIVORCE_RESENTMENT_THRESHOLD = 0.75
+
+# Phase D: conflict-resolution bonus.
+# Awarded when an agent's pressure was above this threshold and dropped by at
+# least _RESOLUTION_DROP in one step — the policy actively de-escalated.
+_RESOLUTION_PRESSURE_THRESHOLD: float = 0.60
+_RESOLUTION_DROP: float = 0.05
+_RESOLUTION_BONUS: float = 0.05
 
 
 class MarriageEnv(gym.Env):
@@ -84,8 +92,8 @@ class MarriageEnv(gym.Env):
 
         self.events = EventCatalog(events_path)
 
-        # +1 for social_support, +1 for life_stage_frac appended to every observation
-        obs_dim = X_DIM + X_DIM + Y_DIM + (self.events.n_events + 1) + 1 + 1
+        # +Y_DIM for noisy partner Y estimate (Phase E), +1 for social_support, +1 for life_stage
+        obs_dim = X_DIM + X_DIM + Y_DIM + Y_DIM + (self.events.n_events + 1) + 1 + 1
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -101,6 +109,9 @@ class MarriageEnv(gym.Env):
         self._distress_streak: int = 0       # consecutive steps in divorce-risk territory
         self._event_counts: dict[str, int] = {}  # how many times each event has fired this episode
         self.social_support: float = 0.6    # couple's external support network strength
+        # C1: recent action history (last 5 steps) used to shift event probabilities
+        self._action_history_h: deque = deque(maxlen=5)
+        self._action_history_w: deque = deque(maxlen=5)
 
     # ── Core Gymnasium interface ───────────────────────────────────────────────
 
@@ -117,6 +128,8 @@ class MarriageEnv(gym.Env):
         self._distress_streak = 0
         self._event_counts = {}
         self.social_support = float(np.random.uniform(self._social_init_low, self._social_init_high))
+        self._action_history_h = deque(maxlen=5)
+        self._action_history_w = deque(maxlen=5)
         self.current_event = self.events.sample(self.x_h, self.x_w, age=self.age)
 
         obs_h = self._get_obs("h")
@@ -126,6 +139,8 @@ class MarriageEnv(gym.Env):
     def step(self, actions):
         action_h = int(actions[0])
         action_w = int(actions[1])
+        self._action_history_h.append(action_h)
+        self._action_history_w.append(action_w)
 
         # Event habituation: repeated events have diminishing base impact.
         # Negative events: 0.85^count floor 0.35 (people numb to chronic stress).
@@ -158,6 +173,10 @@ class MarriageEnv(gym.Env):
             0.0, 1.0,
         ))
 
+        # Snapshot pressure before delta for Phase D resolution bonus
+        prev_pressure_h = self.y_h.pressure
+        prev_pressure_w = self.y_w.pressure
+
         # Compute per-partner ΔY (event + actions + trust/resentment).
         # base_scale = habituation × social_scale: both operate on the base event component.
         delta_h, delta_w = self.events.compute_delta_y(
@@ -178,6 +197,15 @@ class MarriageEnv(gym.Env):
             self.x_w.increment_kids()
 
         reward_h, reward_w = self._compute_rewards()
+
+        # Phase D: resolution bonus — reward explicitly de-escalating high pressure
+        if (prev_pressure_h > _RESOLUTION_PRESSURE_THRESHOLD
+                and prev_pressure_h - self.y_h.pressure > _RESOLUTION_DROP):
+            reward_h = min(1.0, reward_h + _RESOLUTION_BONUS)
+        if (prev_pressure_w > _RESOLUTION_PRESSURE_THRESHOLD
+                and prev_pressure_w - self.y_w.pressure > _RESOLUTION_DROP):
+            reward_w = min(1.0, reward_w + _RESOLUTION_BONUS)
+
         reward = (reward_h + reward_w) / 2.0
 
         self.age += 1
@@ -202,7 +230,11 @@ class MarriageEnv(gym.Env):
             reward_h = reward_w = 0.0   # terminal penalty via missed future rewards
             reward = 0.0
 
-        self.current_event = self.events.sample(self.x_h, self.x_w, age=self.age)
+        self.current_event = self.events.sample(
+            self.x_h, self.x_w, age=self.age,
+            action_history_h=list(self._action_history_h),
+            action_history_w=list(self._action_history_w),
+        )
 
         obs_h = self._get_obs("h")
         obs_w = self._get_obs("w")
@@ -270,7 +302,19 @@ class MarriageEnv(gym.Env):
                 0.0, 1.0,
             )
 
-        # Y state, event, and life_stage are objective observations — no noise.
+        # Phase E: noisy partner Y estimate — same trust-based noise as X_partner.
+        # At trust=1.0 the partner state is exact; at trust=0.0 it is maximally noisy.
+        y_other = self.y_w if agent == "h" else self.y_h
+        y_other_arr = y_other.to_array().copy()
+        y_partner_noise_std = self._partner_obs_noise_scale * (1.0 - y_own.trust)
+        if y_partner_noise_std > 0.0:
+            y_other_arr = np.clip(
+                y_other_arr + self.np_random.normal(
+                    0.0, y_partner_noise_std, size=y_other_arr.shape
+                ).astype(np.float32),
+                0.0, 1.0,
+            )
+
         life_stage_frac = np.float32(
             (self.age - self.age_start) / (self.age_end - self.age_start)
         )
@@ -279,6 +323,7 @@ class MarriageEnv(gym.Env):
             x_self_arr,
             x_other_arr,
             y_own.to_array(),
+            y_other_arr,
             self.events.one_hot(self.current_event),
             [np.float32(self.social_support)],
             [life_stage_frac],

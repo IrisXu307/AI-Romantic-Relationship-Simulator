@@ -485,60 +485,84 @@ _STAGE_PROB_MODIFIERS: dict[str, Callable[[int], float]] = {
 # infidelity risk. Traits must causally influence what happens, not just
 # how agents respond.
 
+# B1: coefficients halved from original — traits nudge the distribution,
+# they don't decide it. Policy choices carry more relative weight.
 _TRAIT_PROB_MODIFIERS: dict[str, Callable[[XTraits, XTraits], float]] = {
-    # Low faithfulness → higher infidelity risk
     "infidelity": lambda h, w: (
-        1.0 - 0.6 * (h.effective("faithfulness") + w.effective("faithfulness")) / 2.0
+        1.0 - 0.3 * (h.effective("faithfulness") + w.effective("faithfulness")) / 2.0
     ),
-    # Emotional conflict: low stability AND high emotional reactivity raise risk;
-    # high EQ offsets it — emotionally intelligent people de-escalate before blowups.
-    # Coefficients ≤ 0.4 so no single trait dominates (anti-overfit).
     "emotional_conflict": lambda h, w: (
         1.0
-        + 0.4 * (1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0)
-        + 0.2 * (h.effective("emotional_reasoning") + w.effective("emotional_reasoning")) / 2.0
-        - 0.2 * (h.effective("eq") + w.effective("eq")) / 2.0
+        + 0.2 * (1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0)
+        + 0.1 * (h.effective("emotional_reasoning") + w.effective("emotional_reasoning")) / 2.0
+        - 0.1 * (h.effective("eq") + w.effective("eq")) / 2.0
     ),
-    # Low responsibility → more financial friction
     "financial_disagreement": lambda h, w: (
-        1.0 + 0.4 * (1.0 - (h.effective("responsibility") + w.effective("responsibility")) / 2.0)
+        1.0 + 0.2 * (1.0 - (h.effective("responsibility") + w.effective("responsibility")) / 2.0)
     ),
-    # Having kids amplifies parenting conflict chance
     "parenting_conflict": lambda h, _: (
-        1.0 + 0.5 * h.kids  # kids is shared, so x_h.kids == x_w.kids
+        1.0 + 0.25 * h.kids
     ),
-    # Low responsibility → more job instability
     "job_loss": lambda h, w: (
-        1.0 - 0.3 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0
+        1.0 - 0.15 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0
     ),
-    # Low mental stability → more mental health episodes
     "mental_health_episode": lambda h, w: (
-        1.0 + 0.4 * (1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0)
+        1.0 + 0.2 * (1.0 - (h.effective("mental_stability") + w.effective("mental_stability")) / 2.0)
     ),
-    # High ability_to_love + EQ → emotional couples express love more readily.
-    # Both traits needed: wanting to love AND knowing how to express it.
     "romantic_gesture": lambda h, w: (
         1.0
-        + 0.3 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0
-        + 0.2 * (h.effective("eq") + w.effective("eq")) / 2.0
+        + 0.15 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0
+        + 0.10 * (h.effective("eq") + w.effective("eq")) / 2.0
     ),
-    # High EQ + ability_to_love → couples actively seek connection time together.
     "quality_time": lambda h, w: (
         1.0
-        + 0.3 * (h.effective("eq") + w.effective("eq")) / 2.0
-        + 0.2 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0
+        + 0.15 * (h.effective("eq") + w.effective("eq")) / 2.0
+        + 0.10 * (h.effective("ability_to_love") + w.effective("ability_to_love")) / 2.0
     ),
-    # Kindness is the most direct predictor of everyday positive micro-interactions.
     "everyday_kindness": lambda h, w: (
-        1.0 + 0.4 * (h.effective("kindness") + w.effective("kindness")) / 2.0
+        1.0 + 0.2 * (h.effective("kindness") + w.effective("kindness")) / 2.0
     ),
-    # High responsibility + IQ → couples who set and reach shared goals.
     "shared_achievement": lambda h, w: (
         1.0
-        + 0.2 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0
-        + 0.15 * (h.effective("iq") + w.effective("iq")) / 2.0
+        + 0.10 * (h.effective("responsibility") + w.effective("responsibility")) / 2.0
+        + 0.075 * (h.effective("iq") + w.effective("iq")) / 2.0
     ),
 }
+
+
+# ── C1: Behavior-pattern event probability modifiers ─────────────────────────
+#
+# A consistent behavioral pattern over the last N steps shifts the event mix.
+# Cooperative couples (support/compromise dominant) experience less conflict
+# and more positive events — their behavior shapes their circumstances.
+# Destructive couples (argue/ignore dominant) face escalating conflict.
+#
+# This creates genuine long-term strategy: a patient cooperator gets a
+# different future than a chronic avoider, regardless of their traits.
+
+_BEHAVIOR_PROB_MODIFIERS: dict[str, dict[str, float]] = {
+    "cooperative": {   # support/compromise > 60% of recent actions
+        "emotional_conflict":    0.55,
+        "infidelity":            0.65,
+        "romantic_gesture":      1.40,
+        "quality_time":          1.30,
+        "everyday_kindness":     1.20,
+    },
+    "destructive": {   # argue/ignore > 60% of recent actions
+        "emotional_conflict":    1.55,
+        "infidelity":            1.35,
+        "mental_health_episode": 1.25,
+        "romantic_gesture":      0.65,
+        "quality_time":          0.70,
+    },
+}
+
+# C2: During high-stakes events, action choice matters much more.
+# Same event + different action → very different trajectory.
+_HIGH_STAKES_EVENTS: frozenset = frozenset({
+    "infidelity", "family_death", "health_crisis", "mental_health_episode",
+})
+_HIGH_STAKES_ACTION_SCALE: float = 1.8
 
 
 # ── Event catalog ─────────────────────────────────────────────────────────────
@@ -554,16 +578,20 @@ class EventCatalog:
         self.probs: np.ndarray = np.array([e["probability"] for e in self.events], dtype=np.float64)
         self.n_events: int = len(self.events)
 
-    def _adjusted_probs(self, x_h: XTraits, x_w: XTraits, age: int = 25) -> np.ndarray:
+    def _adjusted_probs(
+        self,
+        x_h: XTraits,
+        x_w: XTraits,
+        age: int = 25,
+        action_history_h: Optional[list] = None,
+        action_history_w: Optional[list] = None,
+    ) -> np.ndarray:
         """
-        Compute per-event probabilities adjusted for the couple's traits and life stage.
+        Compute per-event probabilities adjusted for traits, life stage, and behavior history.
 
-        Total probability mass is preserved (same overall event frequency),
-        but redistributed across events: e.g. faithful couples face less
-        infidelity risk; older couples face more health crises.
-
-        Both trait modifiers and life-stage modifiers are applied in a single
-        pass, then the distribution is renormalized once.
+        C1: if the combined recent action history is >60% cooperative (support/compromise)
+        or >60% destructive (argue/ignore), apply _BEHAVIOR_PROB_MODIFIERS to shift
+        the event mix toward their behavioral pattern's natural consequences.
         """
         probs = self.probs.copy()
         for i, event in enumerate(self.events):
@@ -574,6 +602,30 @@ class EventCatalog:
             if name in _STAGE_PROB_MODIFIERS:
                 modifier = float(np.clip(_STAGE_PROB_MODIFIERS[name](age), 0.0, 3.0))
                 probs[i] *= modifier
+
+        # C1: behavior history shifts event probabilities
+        all_actions: list[int] = []
+        if action_history_h:
+            all_actions.extend(action_history_h)
+        if action_history_w:
+            all_actions.extend(action_history_w)
+        if all_actions:
+            cooperative_actions = {ACTION_SUPPORT, ACTION_COMPROMISE}
+            destructive_actions = {ACTION_ARGUE, ACTION_IGNORE}
+            n = len(all_actions)
+            coop_frac = sum(1 for a in all_actions if a in cooperative_actions) / n
+            dest_frac = sum(1 for a in all_actions if a in destructive_actions) / n
+            behavior_key: Optional[str] = None
+            if coop_frac > 0.60:
+                behavior_key = "cooperative"
+            elif dest_frac > 0.60:
+                behavior_key = "destructive"
+            if behavior_key is not None:
+                mods = _BEHAVIOR_PROB_MODIFIERS[behavior_key]
+                for i, event in enumerate(self.events):
+                    if event["name"] in mods:
+                        probs[i] *= float(np.clip(mods[event["name"]], 0.2, 3.0))
+
         # Rescale to preserve the original total event probability
         original_total = self.probs.sum()
         adjusted_total = probs.sum()
@@ -586,6 +638,8 @@ class EventCatalog:
         x_h: Optional[XTraits] = None,
         x_w: Optional[XTraits] = None,
         age: int = 25,
+        action_history_h: Optional[list] = None,
+        action_history_w: Optional[list] = None,
     ) -> Optional[dict]:
         """
         Sample one event or None (no major event this year).
@@ -595,7 +649,11 @@ class EventCatalog:
         Remaining probability mass after all events = chance of a quiet year.
         """
         if x_h is not None and x_w is not None:
-            probs = self._adjusted_probs(x_h, x_w, age=age)
+            probs = self._adjusted_probs(
+                x_h, x_w, age=age,
+                action_history_h=action_history_h,
+                action_history_w=action_history_w,
+            )
         else:
             probs = self.probs
 
@@ -653,14 +711,19 @@ class EventCatalog:
         delta_h: dict[str, float] = dict(base)
         delta_w: dict[str, float] = dict(base)
 
+        # C2: high-stakes events amplify action impact — the same response to a
+        # crisis vs a mild event has very different consequences.
+        event_name = event["name"] if event is not None else ""
+        action_scale = _HIGH_STAKES_ACTION_SCALE if event_name in _HIGH_STAKES_EVENTS else 1.0
+
         # 2. Action effects: each partner experiences what their partner does to them
         #    W's action → how H's subjective state changes (H is the receiver)
         for key, val in _action_delta(action_w, x_w, x_h, action_h).items():
-            delta_h[key] = delta_h.get(key, 0.0) + val
+            delta_h[key] = delta_h.get(key, 0.0) + val * action_scale
 
         #    H's action → how W's subjective state changes (W is the receiver)
         for key, val in _action_delta(action_h, x_h, x_w, action_w).items():
-            delta_w[key] = delta_w.get(key, 0.0) + val
+            delta_w[key] = delta_w.get(key, 0.0) + val * action_scale
 
         # 2.5. Actor self-effects: personality-driven gains/costs of your own action
         for key, val in _SELF_EFFECTS[action_h](x_h).items():
