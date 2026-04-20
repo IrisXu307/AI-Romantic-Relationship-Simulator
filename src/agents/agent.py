@@ -39,6 +39,11 @@ class Agent:
             lr=lr,
         )
         self._trajectory: list[tuple] = []  # (obs, action, log_prob, reward, value)
+        # Running return statistics — updated across episodes so the value network
+        # can distinguish a great marriage from a mediocre one (per-episode norm kills this signal).
+        self._ret_mean: float = 0.0
+        self._ret_std:  float = 1.0
+        self._ret_ema_decay: float = 0.99
 
     # ── Episode collection ─────────────────────────────────────────────────────
 
@@ -94,11 +99,14 @@ class Agent:
         if adv_t.numel() > 1:
             adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
 
-        # Normalize returns for value loss
-        if ret_t.numel() > 1:
-            ret_norm = (ret_t - ret_t.mean()) / (ret_t.std() + 1e-8)
-        else:
-            ret_norm = ret_t
+        # Normalize returns using running cross-episode mean/std.
+        # Per-episode normalization collapses the signal that separates good marriages from bad ones.
+        ep_mean = float(ret_t.mean())
+        ep_std  = max(float(ret_t.std()), 1e-8)
+        d = self._ret_ema_decay
+        self._ret_mean = d * self._ret_mean + (1 - d) * ep_mean
+        self._ret_std  = d * self._ret_std  + (1 - d) * ep_std
+        ret_norm = (ret_t - self._ret_mean) / (self._ret_std + 1e-8)
 
         total_pol_loss = 0.0
         total_val_loss = 0.0

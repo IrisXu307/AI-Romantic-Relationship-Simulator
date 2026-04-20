@@ -5,7 +5,10 @@ from gymnasium import spaces
 from typing import Optional
 
 from src.env.state import XTraits, YState, X_DIM, Y_DIM
-from src.env.events import EventCatalog, N_ACTIONS
+from src.env.events import (
+    EventCatalog, N_ACTIONS,
+    ACTION_SUPPORT, ACTION_ARGUE, ACTION_IGNORE, ACTION_COMPROMISE, ACTION_WITHDRAW,
+)
 
 # How much social_support shifts after specific life events.
 # Negative = isolation (relocation breaks community ties, grief shrinks social world).
@@ -101,6 +104,8 @@ class MarriageEnv(gym.Env):
         self._distress_streak: int = 0       # consecutive steps in divorce-risk territory
         self._event_counts: dict[str, int] = {}  # how many times each event has fired this episode
         self.social_support: float = 0.6    # couple's external support network strength
+        self._last_action_h: int = ACTION_SUPPORT
+        self._last_action_w: int = ACTION_SUPPORT
 
     # ── Core Gymnasium interface ───────────────────────────────────────────────
 
@@ -117,6 +122,8 @@ class MarriageEnv(gym.Env):
         self._distress_streak = 0
         self._event_counts = {}
         self.social_support = float(np.random.uniform(self._social_init_low, self._social_init_high))
+        self._last_action_h = ACTION_SUPPORT
+        self._last_action_w = ACTION_SUPPORT
         self.current_event = self.events.sample(self.x_h, self.x_w, age=self.age)
 
         obs_h = self._get_obs("h")
@@ -126,6 +133,8 @@ class MarriageEnv(gym.Env):
     def step(self, actions):
         action_h = int(actions[0])
         action_w = int(actions[1])
+        self._last_action_h = action_h
+        self._last_action_w = action_w
 
         # Event habituation: repeated events have diminishing base impact.
         # Negative events: 0.85^count floor 0.35 (people numb to chronic stress).
@@ -313,8 +322,29 @@ class MarriageEnv(gym.Env):
             max_possible = hw_age + sw + ww_age + 0.15 + 0.10
             return float(np.clip(raw / max_possible, 0.0, 1.0))
 
-        r_h = _reward(self.y_h, self._happiness_w_h, self._stability_w_h, self._wealth_w_h)
-        r_w = _reward(self.y_w, self._happiness_w_w, self._stability_w_w, self._wealth_w_w)
+        def _consistency_bonus(x: XTraits, action: int) -> float:
+            """Small reward for acting in character — reinforces personality differentiation.
+            Caring/empathetic agents flourish by supporting; rational agents by compromising;
+            volatile agents get slight relief from arguing. Max bonus is 0.05."""
+            kindness    = x.effective("kindness")
+            eq          = x.effective("eq")
+            rt          = x.effective("rational_thinking")
+            ms          = x.effective("mental_stability")
+            if action == ACTION_SUPPORT:
+                return 0.05 * kindness * eq
+            if action == ACTION_COMPROMISE:
+                return 0.05 * rt * x.effective("responsibility")
+            if action == ACTION_ARGUE:
+                # hot-headed low-stability agents get tiny cathartic relief
+                volatility = max(0.0, 0.5 - ms) * 2.0
+                return 0.02 * volatility
+            return 0.0
+
+        bonus_h = _consistency_bonus(self.x_h, self._last_action_h)
+        bonus_w = _consistency_bonus(self.x_w, self._last_action_w)
+
+        r_h = min(1.0, _reward(self.y_h, self._happiness_w_h, self._stability_w_h, self._wealth_w_h) + bonus_h)
+        r_w = min(1.0, _reward(self.y_w, self._happiness_w_w, self._stability_w_w, self._wealth_w_w) + bonus_w)
         return r_h, r_w
 
     def _sample_x(self) -> XTraits:
