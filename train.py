@@ -373,10 +373,11 @@ def main():
           f"lr={lr}  gamma={gamma}  episodes={n_episodes}")
 
     # PPO hyperparameters
-    clip_eps    = cfg["ppo"]["clip_eps"]
-    ppo_epochs  = cfg["ppo"]["epochs"]
-    gae_lambda  = cfg["ppo"]["gae_lambda"]
-    entropy_coef = cfg["ppo"]["entropy_coef"]
+    clip_eps      = cfg["ppo"]["clip_eps"]
+    ppo_epochs    = cfg["ppo"]["epochs"]
+    gae_lambda    = cfg["ppo"]["gae_lambda"]
+    entropy_start = cfg["ppo"]["entropy_start"]
+    entropy_end   = cfg["ppo"]["entropy_end"]
 
     # Agents
     agent_h = Agent(obs_dim, n_actions, hidden_dim, lr, device, clip_eps, ppo_epochs, gae_lambda, x_dim=X_DIM)
@@ -400,6 +401,9 @@ def main():
     t0 = time.time()
 
     for ep in range(start_ep, n_episodes):
+        progress     = (ep - start_ep) / max(1, n_episodes - 1 - start_ep)
+        entropy_coef = entropy_start + (entropy_end - entropy_start) * progress
+
         ep_info = run_episode(env, agent_h, agent_w, x_change_mag, train=True)
 
         loss_h_pol, loss_h_val = agent_h.update(gamma, entropy_coef)
@@ -407,6 +411,7 @@ def main():
 
         ep_info.update({
             "episode":       ep,
+            "entropy_coef":  entropy_coef,
             "loss_h_policy": loss_h_pol,
             "loss_h_value":  loss_h_val,
             "loss_w_policy": loss_w_pol,
