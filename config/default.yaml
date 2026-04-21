@@ -53,4 +53,5 @@ ppo:
   clip_eps: 0.2      # PPO clipping epsilon
   epochs: 4          # update passes per episode
   gae_lambda: 0.95   # GAE smoothing factor
-  entropy_coef: 0.01 # entropy bonus weight
+  entropy_start: 0.10  # entropy coef at episode 0 — keeps exploration high early
+  entropy_end:   0.01  # entropy coef at final episode — allows policy to sharpen
