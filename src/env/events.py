@@ -236,9 +236,11 @@ _SELF_EFFECTS: dict[int, Callable[[XTraits], dict[str, float]]] = {
         "love_support": x.effective("eq") * x.effective("ability_to_love") * 0.03,
     },
     # Rational actors (rational_thinking > 0.5) feel intellectual satisfaction from solving problems.
+    # Also gain love_support: resolving conflict together is a form of intimacy for analytical people.
     ACTION_COMPROMISE: lambda x: {
-        "pressure":  -(max(0.0, x.effective("rational_thinking") - 0.5) * 2.0) * 0.10,
-        "stability":  (max(0.0, x.effective("rational_thinking") - 0.5) * 2.0) * x.effective("responsibility") * 0.05,
+        "pressure":     -(max(0.0, x.effective("rational_thinking") - 0.5) * 2.0) * 0.10,
+        "stability":     (max(0.0, x.effective("rational_thinking") - 0.5) * 2.0) * x.effective("responsibility") * 0.05,
+        "love_support":  (max(0.0, x.effective("rational_thinking") - 0.5) * 2.0) * 0.06,
     },
     # Strategic ignorers (high mental_stability) feel calm; chronic neglectors feel guilt.
     # Linear around 0.5: positive self-effect for stable, negative for unstable.

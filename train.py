@@ -209,32 +209,57 @@ def reflect(x_traits, delta_y: dict, magnitude: float):
     """
     Nudge an agent's *learned* traits after a significant life event.
 
-    Mapping:
-      happiness ↑ → eq, ability_to_love ↑
-      happiness ↓ → mental_stability ↓
-      stability ↑ → mental_stability, responsibility ↑
-      stability ↓ → mental_stability ↓
-      pressure  ↑ → mental_stability ↓
-      love_support ↑ → kindness, ability_to_love ↑
+    Personality-typed: the same event grows different traits depending on who you are.
+      - happiness ↑: analytical agents (high IQ/RT) grow rational_thinking; emotional grow eq
+      - happiness ↑: rational agents also grow eq slowly — they can learn emotional skills analytically
+      - wealth ↑: high rational_thinking agents grow iq and rational_thinking
+      - stability ↑: already-responsible agents reinforce responsibility further
+      - pressure ↑: unstable agents take a larger mental_stability hit
+      - love_support ↑: high-EQ agents grow eq/ability_to_love most
     """
-    dh = delta_y.get("happiness", 0.0)
-    ds = delta_y.get("stability", 0.0)
-    dp = delta_y.get("pressure",  0.0)
+    dh = delta_y.get("happiness",    0.0)
+    ds = delta_y.get("stability",    0.0)
+    dp = delta_y.get("pressure",     0.0)
     dl = delta_y.get("love_support", 0.0)
+    dw = delta_y.get("wealth",       0.0)
+
+    iq_eff   = x_traits.effective("iq")
+    eq_eff   = x_traits.effective("eq")
+    rt_eff   = x_traits.effective("rational_thinking")
+    ms_eff   = x_traits.effective("mental_stability")
+    resp_eff = x_traits.effective("responsibility")
 
     adj = {name: 0.0 for name in _TRAIT_NAMES}
 
-    adj["eq"]              += magnitude * max(dh, 0)
-    adj["ability_to_love"] += magnitude * max(dh, 0) * 0.5
-    adj["mental_stability"] += magnitude * dh  # negative dh → negative nudge
+    # Happiness: analytical types learn from what worked; emotional types deepen feeling.
+    # Rational types also gain eq slowly — they can learn emotional skills through analysis.
+    if dh > 0:
+        adj["rational_thinking"] += magnitude * dh * iq_eff
+        adj["eq"]                += magnitude * dh * (1.0 - iq_eff)
+        adj["eq"]                += magnitude * dh * rt_eff * 0.25   # rational self-improvement path
+        adj["ability_to_love"]   += magnitude * dh * eq_eff * 0.5
+    else:
+        adj["mental_stability"]  += magnitude * dh  # universal hit for unhappiness
 
-    adj["mental_stability"] += magnitude * ds * 0.5
-    adj["responsibility"]   += magnitude * max(ds, 0) * 0.3
+    # Stability: reinforces existing strengths
+    adj["mental_stability"]  += magnitude * ds * 0.5
+    adj["responsibility"]    += magnitude * max(ds, 0.0) * resp_eff * 0.4
 
-    adj["mental_stability"] -= magnitude * dp * 0.5  # pressure hurts stability
+    # Pressure: unstable agents are hit harder
+    instability = max(0.0, 0.5 - ms_eff) * 2.0
+    adj["mental_stability"]  -= magnitude * max(dp, 0.0) * (0.3 + 0.4 * instability)
 
-    adj["kindness"]        += magnitude * max(dl, 0) * 0.3
-    adj["ability_to_love"] += magnitude * max(dl, 0) * 0.3
+    # Love/connection: high-EQ agents absorb the growth most
+    if dl > 0:
+        adj["kindness"]         += magnitude * dl * 0.3
+        adj["eq"]               += magnitude * dl * eq_eff * 0.3
+        adj["ability_to_love"]  += magnitude * dl * eq_eff * 0.4
+
+    # Financial success: rational types extract strategic insight
+    if dw > 0:
+        adj["iq"]                += magnitude * dw * rt_eff * 0.3
+        adj["rational_thinking"] += magnitude * dw * rt_eff * 0.4
+        adj["responsibility"]    += magnitude * dw * resp_eff * 0.2
 
     for name, delta in adj.items():
         if delta != 0.0:
