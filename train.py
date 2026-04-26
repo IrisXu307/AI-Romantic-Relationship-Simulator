@@ -18,6 +18,7 @@ x_change_magnitude (0.05) so traits can never fully converge.
 
 import argparse
 import json
+import multiprocessing as mp
 import random
 import time
 from collections import deque
@@ -188,6 +189,51 @@ def evaluate_by_category(env: MarriageEnv, agent_h: Agent, agent_w: Agent, n_eva
             happiness_list.append(info["happiness"])
         results[cat] = float(np.mean(happiness_list))
     return results
+
+
+# ── Background eval worker ───────────────────────────────────────────────────
+
+def _eval_worker(
+    state_dicts: dict,
+    config_path: str,
+    events_path: str,
+    obs_dim: int,
+    hidden_dim: int,
+    n_eval: int,
+    episode: int,
+    result_queue: mp.Queue,
+) -> None:
+    """
+    Runs in a separate process so the main training loop is never blocked.
+    Receives a snapshot of model weights, builds its own env + agents,
+    runs evaluate_by_category + log_archetypes, then puts results on the queue.
+    """
+    device = torch.device("cpu")
+    env = MarriageEnv(config_path, events_path)
+    agent_h = Agent(obs_dim, 5, hidden_dim, lr=1e-3, device=device, x_dim=X_DIM)
+    agent_w = Agent(obs_dim, 5, hidden_dim, lr=1e-3, device=device, x_dim=X_DIM)
+    agent_h.policy.load_state_dict(state_dicts["h_policy"])
+    agent_h.value.load_state_dict(state_dicts["h_value"])
+    agent_w.policy.load_state_dict(state_dicts["w_policy"])
+    agent_w.value.load_state_dict(state_dicts["w_value"])
+    agent_h.policy.eval()
+    agent_w.policy.eval()
+
+    cat_scores = evaluate_by_category(env, agent_h, agent_w, n_eval=n_eval)
+    cat_scores["episode"] = episode
+    arch_dists = log_archetypes(env, agent_h, agent_w, episode)
+    cat_scores["archetypes"] = arch_dists
+    result_queue.put((episode, cat_scores))
+
+
+def _snapshot_weights(agent_h: "Agent", agent_w: "Agent") -> dict:
+    """Deep-copy model weights to plain CPU dicts (safe to pickle across processes)."""
+    return {
+        "h_policy": {k: v.cpu().clone() for k, v in agent_h.policy.state_dict().items()},
+        "h_value":  {k: v.cpu().clone() for k, v in agent_h.value.state_dict().items()},
+        "w_policy": {k: v.cpu().clone() for k, v in agent_w.policy.state_dict().items()},
+        "w_value":  {k: v.cpu().clone() for k, v in agent_w.value.state_dict().items()},
+    }
 
 
 # ── Reflection ────────────────────────────────────────────────────────────────
@@ -423,6 +469,21 @@ def main():
           f"{'Stability':>9}  {'Reflect':>7}  {'Loss-H':>8}")
     print("─" * 72)
 
+    # Background eval state
+    _eval_proc:  mp.Process | None = None
+    _eval_queue: mp.Queue = mp.Queue()
+
+    def _drain_eval_queue():
+        """Collect any finished background eval results into eval_history."""
+        while not _eval_queue.empty():
+            ep_done, cat_scores = _eval_queue.get_nowait()
+            eval_history.append(cat_scores)
+            scores_str = "  ".join(
+                f"{k}={v:.3f}" for k, v in cat_scores.items()
+                if k not in ("episode", "archetypes")
+            )
+            print(f"  [eval ep={ep_done}] {scores_str}")
+
     t0 = time.time()
 
     for ep in range(start_ep, n_episodes):
@@ -459,17 +520,30 @@ def main():
         if (ep + 1) % args.save_every == 0:
             save_checkpoint(args.checkpoint, ep + 1, agent_h, agent_w, all_metrics)
 
-        # Per-category evaluation
+        # Per-category evaluation — runs in a background process, never blocks training.
+        # Drain previous results first, then launch a new worker if the last one finished.
         if (ep + 1) % args.eval_every == 0:
+            _drain_eval_queue()
             ckpt_path = Path(args.checkpoint).parent / f"ep_{ep+1}.pt"
             save_checkpoint(str(ckpt_path), ep + 1, agent_h, agent_w, all_metrics)
-            cat_scores = evaluate_by_category(env, agent_h, agent_w, n_eval=200)
-            cat_scores["episode"] = ep + 1
-            eval_history.append(cat_scores)
-            scores_str = "  ".join(f"{k}={v:.3f}" for k, v in cat_scores.items() if k != "episode")
-            print(f"  [eval ep={ep+1}] {scores_str}")
-            arch_dists = log_archetypes(env, agent_h, agent_w, ep + 1)
-            cat_scores["archetypes"] = arch_dists
+
+            # Skip if previous eval is still running (training is faster than eval)
+            if _eval_proc is None or not _eval_proc.is_alive():
+                weights = _snapshot_weights(agent_h, agent_w)
+                _eval_proc = mp.Process(
+                    target=_eval_worker,
+                    args=(weights, args.config, args.events,
+                          obs_dim, hidden_dim, 200, ep + 1, _eval_queue),
+                    daemon=True,
+                )
+                _eval_proc.start()
+                print(f"  [eval ep={ep+1}] launched in background (pid={_eval_proc.pid})")
+
+    # Wait for the last background eval to finish and collect its results
+    if _eval_proc is not None and _eval_proc.is_alive():
+        print("Waiting for background eval to finish...")
+        _eval_proc.join()
+    _drain_eval_queue()
 
     elapsed = time.time() - t0
     print(f"\nDone — {elapsed:.1f}s total  ({elapsed / n_episodes * 1000:.1f} ms/ep)")
