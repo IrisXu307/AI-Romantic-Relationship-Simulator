@@ -564,7 +564,7 @@ _BEHAVIOR_PROB_MODIFIERS: dict[str, dict[str, float]] = {
 _HIGH_STAKES_EVENTS: frozenset = frozenset({
     "infidelity", "family_death", "health_crisis", "mental_health_episode",
 })
-_HIGH_STAKES_ACTION_SCALE: float = 1.8
+_HIGH_STAKES_ACTION_SCALE: float = 2.2
 
 
 # ── Event catalog ─────────────────────────────────────────────────────────────

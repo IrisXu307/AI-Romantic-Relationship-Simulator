@@ -51,9 +51,10 @@ events:
     probability: 0.04
     base_delta_y:
       wealth: -0.15
-      pressure: 0.30
-      love_support: 0.05
-      happiness: -0.15
+      pressure: 0.22
+      love_support: 0.08
+      happiness: -0.12
+      stability: 0.02
 
   - name: infidelity
     description: "One partner's unfaithfulness is discovered."
@@ -75,9 +76,10 @@ events:
     description: "Loss of a close family member."
     probability: 0.03
     base_delta_y:
-      pressure: 0.20
-      happiness: -0.20
-      love_support: 0.05
+      pressure: 0.18
+      happiness: -0.18
+      love_support: 0.08
+      stability: 0.03
 
   - name: relocation
     description: "The couple moves to a new city or country."
@@ -99,9 +101,9 @@ events:
     description: "One partner experiences a significant mental health struggle."
     probability: 0.04
     base_delta_y:
-      pressure: 0.25
-      love_support: -0.10
-      happiness: -0.15
+      pressure: 0.18
+      love_support: -0.06
+      happiness: -0.12
 
   - name: romantic_gesture
     description: "One partner makes a significant romantic effort."

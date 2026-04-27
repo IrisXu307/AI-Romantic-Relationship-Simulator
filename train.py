@@ -333,6 +333,7 @@ def run_episode(
     reflections = 0
 
     done = False
+    steps = 0
     while not done:
         action_h, log_prob_h, value_h = agent_h.act(obs_h)
         action_w, log_prob_w, value_w = agent_w.act(obs_w)
@@ -357,17 +358,21 @@ def run_episode(
         ep_reward_w += reward_w
         ep_happiness.append(info["happiness"])
         ep_stability.append(info["stability"])
+        steps += 1
 
         obs_h, obs_w = obs_h_next, obs_w_next
 
     return {
-        "reward_h":       ep_reward_h,
-        "reward_w":       ep_reward_w,
-        "mean_happiness": float(np.mean(ep_happiness)),
-        "mean_stability": float(np.mean(ep_stability)),
+        "reward_h":        ep_reward_h,
+        "reward_w":        ep_reward_w,
+        "reward_h_mean":   ep_reward_h / steps,   # per-step, comparable to happiness
+        "reward_w_mean":   ep_reward_w / steps,
+        "steps":           steps,
+        "mean_happiness":  float(np.mean(ep_happiness)),
+        "mean_stability":  float(np.mean(ep_stability)),
         "final_happiness": ep_happiness[-1],
         "final_stability": ep_stability[-1],
-        "reflections":    reflections,
+        "reflections":     reflections,
     }
 
 
@@ -449,6 +454,7 @@ def main():
     gae_lambda  = cfg["ppo"]["gae_lambda"]
     entropy_start = cfg["ppo"]["entropy_start"]
     entropy_end   = cfg["ppo"]["entropy_end"]
+    update_every  = cfg["ppo"].get("update_every", 1)
 
     # Agents
     agent_h = Agent(obs_dim, n_actions, hidden_dim, lr, device, clip_eps, ppo_epochs, gae_lambda, x_dim=X_DIM)
@@ -490,7 +496,21 @@ def main():
         progress     = (ep - start_ep) / max(1, n_episodes - 1 - start_ep)
         entropy_coef = entropy_start + (entropy_end - entropy_start) * progress
 
+        # Collect update_every episodes before each PPO update.
+        # Trajectories are accumulated inside each agent's buffer across calls.
         ep_info = run_episode(env, agent_h, agent_w, x_change_mag, train=True)
+        for _ in range(update_every - 1):
+            extra = run_episode(env, agent_h, agent_w, x_change_mag, train=True)
+            # Merge extra episode stats into ep_info (running sum; averaged below)
+            for k in ("reward_h", "reward_w", "reward_h_mean", "reward_w_mean",
+                      "mean_happiness", "mean_stability", "final_happiness",
+                      "final_stability", "reflections", "steps"):
+                ep_info[k] = ep_info.get(k, 0) + extra.get(k, 0)
+        if update_every > 1:
+            for k in ("reward_h_mean", "reward_w_mean", "mean_happiness",
+                      "mean_stability", "final_happiness", "final_stability",
+                      "reflections"):
+                ep_info[k] /= update_every
 
         loss_h_pol, loss_h_val = agent_h.update(gamma, entropy_coef)
         loss_w_pol, loss_w_val = agent_w.update(gamma, entropy_coef)
@@ -505,13 +525,13 @@ def main():
         all_metrics.append(ep_info)
         window.append(ep_info)
 
-        # Console log every 50 episodes
+        # Console log every 1000 episodes
         if (ep + 1) % 1000 == 0 or ep == start_ep:
-            keys = ["reward_h", "reward_w", "mean_happiness",
+            keys = ["reward_h_mean", "reward_w_mean", "mean_happiness",
                     "mean_stability", "reflections", "loss_h_policy"]
             avg = {k: float(np.mean([m[k] for m in window])) for k in keys}
             print(
-                f"{ep+1:>7}  {avg['reward_h']:>7.3f}  {avg['reward_w']:>7.3f}  "
+                f"{ep+1:>7}  {avg['reward_h_mean']:>7.3f}  {avg['reward_w_mean']:>7.3f}  "
                 f"{avg['mean_happiness']:>9.3f}  {avg['mean_stability']:>9.3f}  "
                 f"{avg['reflections']:>7.1f}  {avg['loss_h_policy']:>8.4f}"
             )

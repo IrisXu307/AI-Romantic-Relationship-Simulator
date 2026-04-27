@@ -43,15 +43,16 @@ reward:
     wealth_weight: 0.0
 
 training:
-  learning_rate: 0.0005
+  learning_rate: 0.0003
   gamma: 0.99        # discount factor for future rewards
   episodes: 1000000
-  hidden_dim: 128
+  hidden_dim: 192
   seed: 42
 
 ppo:
   clip_eps: 0.15     # tighter clipping to compensate for more epochs
   epochs: 8          # more gradient steps per episode batch
   gae_lambda: 0.95   # GAE smoothing factor
-  entropy_start: 0.02  # low enough to let policy gradient dominate from the start
-  entropy_end:   0.002 # near-zero at end — policy fully free to specialize
+  entropy_start: 0.05  # higher initial exploration to encourage personality-based differentiation
+  entropy_end:   0.005 # retain some exploration at end
+  update_every: 4    # collect this many episodes before each PPO update

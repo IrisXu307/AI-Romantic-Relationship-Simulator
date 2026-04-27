@@ -90,15 +90,10 @@ class Agent:
         adv_t = torch.tensor(advantages, dtype=torch.float32, device=self.device)
         ret_t = torch.tensor(returns,    dtype=torch.float32, device=self.device)
 
-        # Normalize advantages
+        # Normalize advantages only — keeps gradient direction stable without
+        # distorting the value target scale.
         if adv_t.numel() > 1:
             adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
-
-        # Normalize returns for value loss
-        if ret_t.numel() > 1:
-            ret_norm = (ret_t - ret_t.mean()) / (ret_t.std() + 1e-8)
-        else:
-            ret_norm = ret_t
 
         total_pol_loss = 0.0
         total_val_loss = 0.0
@@ -114,7 +109,7 @@ class Agent:
             policy_loss = -torch.min(surr1, surr2).mean() - entropy_coef * entropy
 
             # Value loss
-            value_loss = nn.functional.mse_loss(self.value(obs_t), ret_norm)
+            value_loss = nn.functional.mse_loss(self.value(obs_t), ret_t)
 
             loss = policy_loss + 0.5 * value_loss
             self.optimizer.zero_grad()
