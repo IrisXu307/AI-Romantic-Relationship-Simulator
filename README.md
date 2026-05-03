@@ -1,8 +1,8 @@
 # AI Romantic Relationship Simulator
 
-A reinforcement learning research project that simulates a marriage between two AI agents across a 55-year lifespan (ages 25–80). Agents learn optimal interpersonal behaviors — not through hard-coded rules, but through a neural network policy trained on experience and reward.
+A reinforcement learning research project that simulates a marriage between two AI agents across a 55-year lifespan (ages 25–80). Each agent learns optimal interpersonal behaviors through a neural network policy trained with Proximal Policy Optimization (PPO) — not hard-coded rules.
 
-> **Motivation:** Can an AI learn what makes a marriage last? This project treats partnership as a sequential decision-making problem and applies policy gradient methods to find out.
+> **Motivation:** Can an AI learn what makes a marriage last? This project treats long-term partnership as a sequential multi-agent decision problem and applies deep RL to find out.
 
 ---
 
@@ -10,36 +10,36 @@ A reinforcement learning research project that simulates a marriage between two 
 
 - [Research Goal](#research-goal)
 - [System Design](#system-design)
-  - [Variable Set X — Internal Traits](#variable-set-x--internal-traits)
-  - [Variable Set Y — Environmental State](#variable-set-y--environmental-state)
+  - [Internal Traits (X)](#internal-traits-x)
+  - [Environmental State (Y)](#environmental-state-y)
   - [Events](#events)
   - [Reflection Mechanism](#reflection-mechanism)
-  - [Learning: Policy Gradient](#learning-policy-gradient)
-- [Why This Is Real ML Training](#why-this-is-real-ml-training)
+  - [Learning: PPO with Value Baseline](#learning-ppo-with-value-baseline)
+- [Personality Archetypes](#personality-archetypes)
 - [Repo Structure](#repo-structure)
 - [Getting Started](#getting-started)
 - [Training Loop](#training-loop)
+- [Evaluation](#evaluation)
 - [Results & Metrics](#results--metrics)
-- [Roadmap](#roadmap)
 
 ---
 
 ## Research Goal
 
-To determine whether a neural network policy can learn optimal responses to life events in a long-term relationship — maximizing **happiness** and **marriage stability** across a simulated lifespan — given two agents with distinct internal trait profiles.
+To determine whether a neural network policy can learn optimal responses to life events in a long-term relationship — maximizing **happiness** and **relationship stability** across a simulated lifespan — given two agents with distinct internal trait profiles and asymmetric reward priorities.
 
 ---
 
 ## System Design
 
-### Variable Set X — Internal Traits
+### Internal Traits (X)
 
-Each agent is initialized with their own independent X vector. These evolve only during **Reflection**.
+Each agent is initialized with their own independent X vector, sampled uniformly from `[0.05, 0.95]`. These evolve only during **Reflection**.
 
 | Variable | Description |
 |---|---|
 | `iq` | Cognitive intelligence |
-| `eq` | Emotional intelligence |
+| `eq` | Emotional intelligence — reduces self-observation noise |
 | `rational_thinking` | Tendency toward logic-based decisions |
 | `emotional_reasoning` | Tendency toward feeling-based decisions |
 | `kindness` | Baseline prosocial disposition |
@@ -49,9 +49,11 @@ Each agent is initialized with their own independent X vector. These evolve only
 | `mental_stability` | Resilience to stress and volatility |
 | `kids` | Presence/number of children (shared, affects both agents) |
 
-### Variable Set Y — Environmental State
+**Observation noise** is trait-dependent: agents with higher EQ perceive their own traits more accurately (`noise_std = obs_noise_scale × (1 − eq)`). Partner traits are estimated with additional noise scaled by relationship trust (`partner_noise_std = partner_obs_noise_scale × (1 − trust)`).
 
-Y variables are shared between both agents and change in response to events and actions.
+### Environmental State (Y)
+
+Y variables are shared between both agents and evolve in response to events and actions.
 
 | Variable | Description |
 |---|---|
@@ -61,69 +63,83 @@ Y variables are shared between both agents and change in response to events and 
 | `happiness` | Primary reward signal |
 | `stability` | Secondary reward signal; measures relationship continuity |
 
+**Reward weights are asymmetric by design** — husband and wife have different life priorities, creating genuine multi-agent tension with no single dominant strategy:
+
+| Agent | Happiness | Stability | Wealth |
+|---|---|---|---|
+| Husband | 0.5 | 0.3 | 0.2 |
+| Wife | 0.6 | 0.4 | 0.0 |
+
 ### Events
 
-Random life events are sampled each simulation step (each "year" of the marriage). Each event targets one or more Y variables with a baseline delta. Examples:
+Random life events are sampled each simulation step (one per "year"). Each event targets one or more Y variables with a baseline delta. Both agents independently select an **action** (support, argue, ignore, compromise, withdraw); the combined response determines the actual ΔY applied.
 
-| Event | Affected Y | Default ΔY |
+| Event | Affected Y | Notes |
 |---|---|---|
-| Job loss | wealth, pressure | −0.3, +0.4 |
-| New child | kids, pressure, love_support | +1, +0.3, ±0.2 |
-| Infidelity | faithfulness, stability, love_support | −0.8, −0.5, −0.6 |
-| Health crisis | wealth, pressure, love_support | −0.2, +0.5, ±0.3 |
-| Financial windfall | wealth, pressure | +0.4, −0.2 |
-| Emotional conflict | love_support, stability | −0.3, −0.2 |
-| Shared achievement | happiness, love_support | +0.3, +0.2 |
+| Job loss | wealth, pressure | Financial shock + stress |
+| New child | kids, pressure, love_support | Documented personality shift |
+| Infidelity | faithfulness, stability, love_support | Identity-level disruption |
+| Health crisis | wealth, pressure, love_support | Confronts mortality |
+| Financial windfall | wealth, pressure | Stress relief |
+| Emotional conflict | love_support, stability | Relationship friction |
+| Shared achievement | happiness, love_support | Bonding event |
+| Mental health episode | pressure, stability | Psychological rupture |
+| Relocation | multiple | Identity and social disruption |
 
-Each agent independently selects an **action** (response) from a discrete action set. The combined response of both agents determines the actual ΔY applied.
+**Social support context:** Each episode samples a couple's external support network strength. Isolated couples (low `social_support`) take amplified hits from negative events: `effective_impact = 1 + 0.30 × (1 − social_support)`.
 
 ### Reflection Mechanism
 
-Reflection is triggered when `|ΔY| > threshold` on any Y variable. It governs whether an agent's X traits change as a result of accumulated experience.
+Reflection triggers when `|ΔY| > 0.15` on any single Y variable. It nudges an agent's learned traits based on the outcome, mimicking real psychological growth — with personality-typed effects:
 
-```
-if |delta_Y| > reflection_threshold:
-    # Early training: perturb X randomly, observe resulting Y
-    # Later training: update X in direction of gradient(reward)
-    adjust_X(agent, delta_X)
-```
+- **Happiness ↑**: analytical agents grow `rational_thinking`; emotional agents grow `eq`; rational agents gain `eq` slowly (they can learn emotional skills through analysis)
+- **Stability ↑**: reinforces `mental_stability` and `responsibility` for already-responsible agents
+- **Pressure ↑**: unstable agents take a larger `mental_stability` hit
+- **Love/support ↑**: high-EQ agents absorb more growth in `eq` and `ability_to_love`
+- **Wealth ↑**: rational agents extract strategic insight into `iq` and `rational_thinking`
 
-This is the mechanism by which agents are allowed to "grow" — slowly shifting their internal traits in response to major life events, mimicking real psychological change over time.
+Major life events trigger larger reflection magnitudes:
 
-### Learning: Policy Gradient
+| Event | Max trait Δ |
+|---|---|
+| Infidelity | 0.20 |
+| Family death | 0.15 |
+| Health/mental health crisis | 0.12 |
+| New child | 0.10 |
+| Relocation | 0.08 |
+| Financial crisis | 0.07 |
+| Minor events (default) | 0.05 |
 
-The core of the system is a learned policy:
+### Learning: PPO with Value Baseline
+
+Each agent runs an independent policy:
 
 ```
 action = π_θ(state)
+state  = [X_self, X_partner, Y_shared, event_encoding]
 ```
 
-Where:
-- `π` is a neural network (MLP or LSTM for temporal memory)
-- `θ` are the learned parameters
-- `state = [X_self, X_partner, Y_shared, event_encoding]`
-- `action` is sampled from a probability distribution over the discrete response set
-
-Update rule (REINFORCE):
+Update rule uses **PPO-clip** with **GAE** (Generalized Advantage Estimation):
 
 ```
-θ ← θ + α · ∇_θ log π_θ(a|s) · G_t
+L_CLIP = E[ min(r_t · A_t,  clip(r_t, 1−ε, 1+ε) · A_t) ]
+A_t    = GAE(rewards, values, γ=0.99, λ=0.95)
 ```
 
-Where `G_t` is the discounted return (future happiness + stability) from timestep `t`.
+Entropy is annealed from `0.05 → 0.005` over training to encourage early exploration and late convergence. Trajectories from `update_every=4` episodes are accumulated before each PPO update.
 
 ---
 
-## Why This Is Real ML Training
+## Personality Archetypes
 
-| Property | Rule-based System | This Project |
+Four fixed trait profiles used during evaluation to verify that different personalities produce different action distributions under the same trained policy:
+
+| Archetype | Description | Key traits |
 |---|---|---|
-| Behavior source | Hand-coded `if/else` | Learned from experience |
-| Parameters | Manual tuning | Gradient updates from reward |
-| Generalization | Fixed rules | Adapts to new event sequences |
-| Improvement | Only when you rewrite it | Improves each training episode |
-
-The key distinction: **you do not specify what the correct response is**. The agent discovers it by trying responses, observing outcomes, and reinforcing what worked.
+| **Secure** | Emotionally intelligent, stable, loving | High EQ, stability, faithfulness, kindness |
+| **Emotional** | Anxious attachment, emotionally intense | High EQ + love, low mental stability |
+| **Rational** | Dismissive attachment, logic-driven | High IQ + rational_thinking, low EQ |
+| **Avoidant** | Fearful attachment, distrusts intimacy | Low EQ, love, stability, faithfulness |
 
 ---
 
@@ -134,44 +150,26 @@ ai-romantic-relationship-simulator/
 │
 ├── README.md
 ├── requirements.txt
-├── .gitignore
+├── train.py                  # Entry point: PPO training loop
 │
 ├── config/
-│   ├── default.yaml          # hyperparameters, thresholds, sim settings
-│   └── events.yaml           # event catalog with base deltas and probabilities
+│   ├── default.yaml          # Hyperparameters, thresholds, reward weights
+│   └── events.yaml           # Event catalog with base deltas and probabilities
 │
 ├── src/
 │   ├── env/
-│   │   ├── __init__.py
 │   │   ├── marriage_env.py   # Gymnasium-compatible environment
-│   │   ├── events.py         # event sampling and delta application
-│   │   └── state.py          # state representation and normalization
+│   │   ├── events.py         # Event sampling and delta application
+│   │   └── state.py          # State representation, normalization, trait names
 │   │
-│   ├── agents/
-│   │   ├── __init__.py
-│   │   ├── agent.py          # Agent class (holds X, calls policy, handles reflection)
-│   │   ├── model.py          # Neural network policy (MLP / LSTM)
-│   │   └── reflection.py     # Reflection trigger logic and X update rules
-│   │
-│   ├── training/
-│   │   ├── __init__.py
-│   │   ├── trainer.py        # Training loop, episode rollout, reward computation
-│   │   ├── reward.py         # Reward shaping: happiness + stability weighting
-│   │   └── buffer.py         # Trajectory buffer for policy gradient updates
-│   │
-│   └── utils/
-│       ├── __init__.py
-│       ├── logging.py        # Metrics logging per episode
-│       └── visualization.py  # Plot Y trajectories, reward curves, X drift
-│
-├── scripts/
-│   ├── train.py              # Entry point: run training
-│   ├── evaluate.py           # Run a single marriage simulation (no gradient update)
-│   └── plot_results.py       # Generate charts from saved run data
+│   └── agents/
+│       └── agent.py          # Agent class (PolicyNet + ValueNet, PPO update)
 │
 ├── data/
-│   ├── runs/                 # Saved episode logs (JSON/CSV)
-│   └── checkpoints/          # Model weight snapshots
+│   ├── checkpoints/          # Model weight snapshots (.pt)
+│   ├── metrics.json          # Per-episode training metrics
+│   ├── eval_history.json     # Per-category evaluation scores over training
+│   └── archetypes_ep*.png    # Archetype action distribution snapshots
 │
 └── tests/
     ├── test_env.py
@@ -186,8 +184,8 @@ ai-romantic-relationship-simulator/
 ### Prerequisites
 
 - Python 3.9+
-- PyTorch
-- Gymnasium
+- PyTorch 2.0+
+- Gymnasium 0.29+
 - NumPy, PyYAML, Matplotlib
 
 ### Install
@@ -201,20 +199,25 @@ pip install -r requirements.txt
 ### Train
 
 ```bash
-python scripts/train.py --config config/default.yaml --episodes 10000
+python train.py                          # full run (1M episodes, defaults)
+python train.py --episodes 5000          # quick smoke test
+python train.py --resume                 # continue from latest checkpoint
+python train.py --plot                   # show training curves after run
 ```
 
-### Evaluate a trained policy
+### Key CLI flags
 
-```bash
-python scripts/evaluate.py --checkpoint data/checkpoints/best_model.pt --render
-```
-
-### Plot results
-
-```bash
-python scripts/plot_results.py --run data/runs/run_001/
-```
+| Flag | Default | Description |
+|---|---|---|
+| `--config` | `config/default.yaml` | Hyperparameter config |
+| `--events` | `config/events.yaml` | Event catalog |
+| `--checkpoint` | `data/checkpoints/latest.pt` | Checkpoint path |
+| `--resume` | false | Resume from checkpoint |
+| `--episodes` | (from config) | Override episode count |
+| `--lr` | (from config) | Override learning rate |
+| `--save-every` | 500 | Checkpoint interval |
+| `--eval-every` | 1000 | Category evaluation interval |
+| `--plot` | false | Plot curves after training |
 
 ---
 
@@ -222,57 +225,58 @@ python scripts/plot_results.py --run data/runs/run_001/
 
 ```
 for episode in range(num_episodes):
-    reset marriage (age=25, sample X for each agent, reset Y)
+    reset marriage (age=25, sample X for each agent, reset Y, sample social_support)
 
     for age in range(25, 80):
-        sample event from event catalog
-        state = [X_husband, X_wife, Y_shared, event]
+        sample event from catalog
+        state = [X_self + noise(eq), X_partner + noise(trust), Y_shared, event]
 
-        action_h = π_θ_h(state)    # husband's policy
-        action_w = π_θ_w(state)    # wife's policy
+        action_h, log_prob_h, value_h = π_θ_h(state)
+        action_w, log_prob_w, value_w = π_θ_w(state)
 
-        ΔY = compute_delta_Y(event, action_h, action_w)
+        ΔY = compute_delta_Y(event, action_h, action_w, social_support)
         Y  = update_Y(Y, ΔY)
 
         if |ΔY| > reflection_threshold:
-            trigger_reflection(agent, ΔY, reward_signal)
+            reflect(x_h, ΔY, magnitude)   # nudge traits based on personality type
+            reflect(x_w, ΔY, magnitude)
 
-        reward = compute_reward(Y.happiness, Y.stability)
-        store (state, action, reward) in trajectory buffer
+        reward_h = happiness_weight·Y.happiness + stability_weight·Y.stability + wealth_weight·Y.wealth
+        store (state, action, log_prob, reward, value) in trajectory buffer
 
-    update θ_h, θ_w via policy gradient on full episode trajectory
+    # Every update_every episodes:
+    update θ_h, θ_w via PPO-clip on accumulated trajectories
+    anneal entropy_coef toward entropy_end
 ```
+
+---
+
+## Evaluation
+
+Category evaluation runs in a **background process** every `eval-every` episodes, so it never blocks training. For each event category (Financial, Family, Health, Relationship, Life Change), 200 episodes are run with only that category's events active.
+
+Archetype evaluation injects each of the four fixed trait profiles into both agents across 30 runs and records the resulting action distributions — producing a behavioral fingerprint of the learned policy.
+
+Snapshots are saved to `data/archetypes_ep{N}.png` and logged as `data/eval_history.json`.
 
 ---
 
 ## Results & Metrics
 
 Each episode logs:
-- Happiness trajectory (age 25–80)
-- Stability trajectory
-- X drift per agent (how much traits shifted via reflection)
-- Actions taken per event type (behavioral fingerprint)
-- Final reward
 
-After training, the goal is to surface:
-1. Which X trait profiles correlate with high long-term happiness
-2. Which action strategies are robust across different event sequences
-3. Whether reflection-driven X changes converge toward a consistent "good partner" profile
+- `reward_h_mean`, `reward_w_mean` — per-step reward for each agent
+- `mean_happiness`, `mean_stability` — average Y state over the episode
+- `final_happiness`, `final_stability` — Y state at age 80
+- `reflections` — number of reflection events triggered
+- `loss_h_policy`, `loss_w_policy` — PPO policy loss
 
----
+Post-training analysis targets:
 
-## Roadmap
-
-- [ ] Implement `marriage_env.py` (Gymnasium environment)
-- [ ] Implement event catalog and sampling (`events.py`)
-- [ ] Build neural network policy (`model.py`)
-- [ ] Implement REINFORCE training loop (`trainer.py`)
-- [ ] Add reflection mechanism (`reflection.py`)
-- [ ] Add visualization (`visualization.py`)
-- [ ] Run baseline experiments (random policy vs. trained)
-- [ ] Experiment: vary initial X distributions, compare outcomes
-- [ ] Experiment: asymmetric traits (mismatched partners)
-- [ ] Write up findings
+1. Which X trait profiles (archetypes) correlate with high long-term happiness
+2. Which action strategies generalize across event categories
+3. Whether reflection-driven trait changes converge toward a consistent "good partner" profile
+4. How asymmetric reward weights affect emergent cooperative vs. self-interested behavior
 
 ---
 
