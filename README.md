@@ -271,12 +271,47 @@ Each episode logs:
 - `reflections` — number of reflection events triggered
 - `loss_h_policy`, `loss_w_policy` — PPO policy loss
 
-Post-training analysis targets:
+### Trained vs. Random Policy (Ablation)
 
-1. Which X trait profiles (archetypes) correlate with high long-term happiness
-2. Which action strategies generalize across event categories
-3. Whether reflection-driven trait changes converge toward a consistent "good partner" profile
-4. How asymmetric reward weights affect emergent cooperative vs. self-interested behavior
+The trained policy consistently outperforms random action selection across all archetypes. The largest gains appear in stability (secure +14%, rational +10%) and divorce rate reduction (emotional −38%, rational −26%, avoidant −26%).
+
+![Ablation: trained vs random policy](data/0_ablation_trained_vs_random.png)
+
+### Outcomes by Personality Archetype
+
+Secure couples achieve the best outcomes across all metrics (89% happiness, 65% stability, 4% divorce rate). Avoidant couples have the worst (50% happiness, 2% stability, 60% divorce rate) — even with a trained policy, attachment style dominates long-run outcomes.
+
+![Outcomes by archetype](data/2_outcomes_by_archetype.png)
+
+### Action Distributions by Personality Type
+
+All four archetypes show similar action frequencies, clustered near the random baseline (20% dashed line). The trained policy learns a broadly similar strategy — the key differentiation comes from *which events trigger which actions*, not the marginal frequency.
+
+![Action distributions by personality type](data/1_action_distributions.png)
+
+### Partner Mismatch — All 16 Archetype Combinations
+
+Heatmaps across all 16 husband × wife archetype pairings. Secure partners consistently lift outcomes regardless of who they're paired with. Avoidant × avoidant is the worst combination at every metric. Notably, a secure husband can partially compensate for an avoidant wife but not vice versa.
+
+![Partner mismatch heatmaps](data/3_partner_mismatch_heatmaps.png)
+
+### Warmth vs. Stability Trade-off
+
+Scatter of final love & support vs. final stability for all 16 pairings. Secure-anchored pairs (top-right) achieve both; emotional and avoidant pairs cluster in the low-stability region regardless of warmth.
+
+![Warmth vs stability trade-off](data/4_warmth_vs_stability.png)
+
+### Y-State Trajectories Over the Lifespan
+
+Mean trajectories (ages 25–80) for surviving couples across archetype pairs. Happiness and love & support decline gradually for most pairs; pressure rises mid-life. Trust grows slowly while resentment accumulates steadily — even in successful marriages.
+
+![Y-state trajectories](data/5_trajectories.png)
+
+### Event Mix Across the Lifespan
+
+Stacked area of event category frequency over age for each archetype. All archetypes face a similar event distribution — the divergence in outcomes is driven by policy response, not event exposure.
+
+![Life stage event profile](data/6_life_stage_event_profile.png)
 
 ---
 
