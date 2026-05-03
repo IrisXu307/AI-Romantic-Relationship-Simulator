@@ -28,8 +28,6 @@ class PolicyNet(nn.Module):
             nn.Tanh(),
             nn.Linear(half, half),
             nn.Tanh(),
-            nn.Linear(half, half),
-            nn.Tanh(),
         )
         self.situation_head = nn.Sequential(
             nn.Linear(sit_dim, half),
@@ -76,8 +74,6 @@ class ValueNet(nn.Module):
 
         self.personality_head = nn.Sequential(
             nn.Linear(x_dim, half),
-            nn.Tanh(),
-            nn.Linear(half, half),
             nn.Tanh(),
             nn.Linear(half, half),
             nn.Tanh(),
